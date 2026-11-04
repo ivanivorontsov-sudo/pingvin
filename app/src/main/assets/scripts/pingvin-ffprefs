@@ -1,0 +1,56 @@
+#!/bin/bash
+# pingvin-ffprefs [PROFILE…]: настройки Firefox по переключателям Пингвина.
+#   /root/.pingvin/ff-nosandbox — отключить песочницу; /root/.pingvin/ff-single — однопроцессный режим.
+# По умолчанию (оба выкл.) Firefox работает со всем включённым: песочница, процессы, JIT, GPU.
+# Выключенная опция снимается: её prefs удаляются из prefs.js, и Firefox берёт свои значения по умолчанию.
+# Без аргументов — Windows-Firefox в префиксе Wine (все профили). --env — печатает export для env.
+NS=/root/.pingvin/ff-nosandbox; [ -e /root/.pingvin/ff-nosandbox.auto ] && NS=/root/.pingvin/ff-nosandbox.auto; SG=/root/.pingvin/ff-single
+SANDBOX_KEYS="security.sandbox.content.level security.sandbox.gpu.level security.sandbox.rdd.level security.sandbox.socket.process.level media.cubeb.sandbox"
+SINGLE_KEYS="browser.tabs.remote.autostart fission.autostart dom.ipc.processCount dom.ipc.processCount.webIsolated dom.ipc.processPrelaunch.enabled layers.gpu-process.enabled media.rdd-process.enabled media.utility-process.enabled network.process.enabled"
+if [ "$1" = --env ]; then
+  # Firefox ≥ ~140 запечатывает shm через memfd seals — под proot это валит content-процессы (proot-distro ставит то же)
+  echo "export MOZ_SHM_NO_SEALS=1"
+  [ -e $NS ] && echo "export MOZ_FAKE_NO_SANDBOX=1 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_GPU_SANDBOX=1 MOZ_DISABLE_UTILITY_SANDBOX=1"
+  [ -e $SG ] && echo "export MOZ_FORCE_DISABLE_E10S=$(sed -n 's/^Version=//p' /usr/lib/firefox-esr/application.ini 2>/dev/null | grep . || echo 1)"
+  exit 0
+fi
+prefs() { cat <<'J'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("network.dns.disableIPv6", true);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("browser.tabs.unloadOnLowMemory", false);
+user_pref("widget.gtk.overlay-scrollbars.enabled", false);
+J
+  [ -e $NS ] && cat <<'J'
+user_pref("security.sandbox.content.level", 0);
+user_pref("security.sandbox.gpu.level", 0);
+user_pref("security.sandbox.rdd.level", 0);
+user_pref("security.sandbox.socket.process.level media.cubeb.sandbox", 0);
+user_pref("media.cubeb.sandbox", false);
+J
+  [ -e $SG ] && cat <<'J'
+user_pref("browser.tabs.remote.autostart", false);
+user_pref("fission.autostart", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("dom.ipc.processCount.webIsolated", 1);
+user_pref("dom.ipc.processPrelaunch.enabled", false);
+user_pref("layers.gpu-process.enabled", false);
+user_pref("media.rdd-process.enabled", false);
+user_pref("media.utility-process.enabled", false);
+user_pref("network.process.enabled", false);
+J
+}
+strip() { local f="$1/prefs.js"; shift; [ -e "$f" ] || return; for k in "$@"; do sed -i "/user_pref(\"${k//./\\.}\",/d" "$f"; done; }
+apply() { mkdir -p "$1"; prefs > "$1/user.js"
+  # снять выключенные опции и старые значения из прежних версий Пингвина (1.8–1.11 жёстко ставили processCount=2, content.level=0 и т.п.)
+  [ -e $NS ] || strip "$1" $SANDBOX_KEYS
+  [ -e $SG ] || strip "$1" $SINGLE_KEYS
+  strip "$1" gfx.webrender.software layers.acceleration.disabled media.hardware-video-decoding.enabled; }
+if [ $# -gt 0 ]; then for p in "$@"; do apply "$p"; done; exit 0; fi
+W=${WINEPREFIX:-/root/.wine}
+for f in "$W"/drive_c/users/*/AppData/Roaming/Mozilla/Firefox/Profiles/*/prefs.js; do [ -e "$f" ] && apply "$(dirname "$f")"; done
+exit 0

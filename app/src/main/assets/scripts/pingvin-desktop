@@ -1,0 +1,92 @@
+#!/bin/bash
+# pingvin-desktop: starts X server :N (TigerVNC Xvnc, RFB on 127.0.0.1:5900+N) + openbox. Idempotent.
+# The app connects with its built-in native VNC client. PINGVIN_NOVNC=1 also starts websockify/noVNC.
+N=${PINGVIN_DISPLAY_NUM:-1}; PORT=${PINGVIN_PORT:-6080}; RFB=$((5900+N))
+export DEBIAN_FRONTEND=noninteractive HOME=${HOME:-/root}
+exec 9>/tmp/.pingvin-desktop.lock; command -v flock >/dev/null && flock 9
+need=""
+[ -x /usr/bin/Xtigervnc ] || command -v Xvnc >/dev/null || need="$need tigervnc-standalone-server"
+[ -x /usr/bin/tigervncpasswd ] || command -v vncpasswd >/dev/null || need="$need tigervnc-tools"
+command -v openbox >/dev/null || need="$need openbox"
+python3 -c 'import tkinter' 2>/dev/null || need="$need python3-tk"
+if [ -n "$need" ]; then
+  [ -d /opt/pingvin/debs ] && [ ! -f /opt/pingvin/debs/.complete ] && { echo "Жду распаковки встроенных пакетов…"; for i in $(seq 120); do [ -f /opt/pingvin/debs/.complete ] && break; sleep 1; done; }
+  if [ -f /opt/pingvin/debs/.complete ] && ls /opt/pingvin/debs/*.deb >/dev/null 2>&1; then
+    tot=$(ls /opt/pingvin/debs/*.deb | wc -l); i=0; : > /tmp/pingvin-debs.log
+    echo "Распаковываю встроенные пакеты дисплея ($tot шт.)…"
+    for d in /opt/pingvin/debs/*.deb; do i=$((i+1)); n=$(basename "$d" | cut -d_ -f1)
+      [ $((i % 10)) = 0 ] || [ $i = $tot ] && echo "  $i/$tot $n"
+      echo "$i/$tot $n" >> /tmp/pingvin-debs.log
+      timeout 120 dpkg-deb -x "$d" / >> /tmp/pingvin-debs.log 2>&1 || echo "  ошибка: $n" | tee -a /tmp/pingvin-debs.log
+    done
+    ldconfig 2>/dev/null; (command -v fc-cache >/dev/null && timeout 300 fc-cache >/dev/null 2>&1 9>&- &)
+    if [ -x /usr/bin/Xtigervnc ] && [ -x /usr/bin/tigervncpasswd ]; then rm -rf /opt/pingvin/debs; echo "Дисплей установлен."; else echo "Встроенные пакеты не помогли, хвост лога:"; tail -15 /tmp/pingvin-debs.log; fi
+  fi
+  [ -x /usr/bin/Xtigervnc ] && [ -x /usr/bin/tigervncpasswd ] && command -v openbox >/dev/null || {
+    echo "Устанавливаю дисплей из сети:$need"; apt-get update -q || true; apt-get install -y --no-install-recommends $need || { echo "PINGVIN_DISPLAY_FAIL apt"; exit 1; }; }
+fi
+# --- what maintainer scripts would have done (packages may be unpacked with dpkg-deb -x) ---
+X=/usr/bin/Xtigervnc; [ -x $X ] || X=$(command -v Xvnc)
+P=/usr/bin/tigervncpasswd; [ -x $P ] || P=$(command -v vncpasswd)
+[ -e /usr/bin/Xvnc ] || ln -sf Xtigervnc /usr/bin/Xvnc 2>/dev/null
+[ -e /usr/bin/vncpasswd ] || ln -sf tigervncpasswd /usr/bin/vncpasswd 2>/dev/null
+[ -f /root/.pingvin/ldconfig-done ] || { timeout 60 ldconfig 2>/dev/null; mkdir -p /root/.pingvin; touch /root/.pingvin/ldconfig-done; }
+mkdir -p /tmp/.X11-unix /tmp/.ICE-unix /var/lib/xkb "$HOME/.pingvin"; chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix; chmod 755 /var/lib/xkb
+[ -e /usr/share/X11/xkb/compiled ] || ln -sf /var/lib/xkb /usr/share/X11/xkb/compiled 2>/dev/null
+port_open() { # 1) /proc/net/tcp (может быть закрыт на Android 10+), 2) /dev/tcp с таймаутом
+  local hx=$(printf ':%04X' "$1")
+  cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p="$hx" '$2 ~ p"$" && $4=="0A"{f=1} END{exit !f}' && return 0
+  timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
+xpid() { [ -f /tmp/.X$N-lock ] && tr -d ' \n' < /tmp/.X$N-lock; }
+alive() { local p=$(xpid); [ -n "$p" ] && kill -0 "$p" 2>/dev/null && port_open $RFB; }
+if ! alive; then
+  [ -n "$X" ] && [ -x "$X" ] || { echo "Нет Xtigervnc в системе"; echo "PINGVIN_DISPLAY_FAIL noxvnc"; exit 1; }
+  p=$(xpid); [ -n "$p" ] && kill "$p" 2>/dev/null
+  rm -f /tmp/.X$N-lock /tmp/.X11-unix/X$N
+  [ -s "$HOME/.pingvin/vncpass" ] || head -c 9 /dev/urandom | od -An -tx1 | tr -d " \n" | cut -c1-8 > "$HOME/.pingvin/vncpass"
+  timeout 20 "$P" -f < "$HOME/.pingvin/vncpass" > "$HOME/.pingvin/vncauth" 2>/tmp/vncpasswd.log || { echo "vncpasswd не сработал:"; cat /tmp/vncpasswd.log; }
+  chmod 600 "$HOME/.pingvin/vncauth" "$HOME/.pingvin/vncpass"
+  echo "Запускаю $X :$N (порт $RFB)…"
+  "$X" :$N -geometry ${PINGVIN_GEOMETRY:-1280x720} -depth 24 -rfbport $RFB -localhost \
+     -SecurityTypes VncAuth -rfbauth "$HOME/.pingvin/vncauth" -nolisten tcp -AlwaysShared \
+     -xkbdir /usr/share/X11/xkb -fp built-ins </dev/null >/tmp/xvnc.log 2>&1 9>&- &
+  XP=$!
+  T=${PINGVIN_XVNC_TIMEOUT:-45}; i=0; shown=0
+  while [ $i -lt $((T*2)) ]; do
+    if ! kill -0 $XP 2>/dev/null; then echo "Xvnc завершился, /tmp/xvnc.log:"; tail -25 /tmp/xvnc.log; echo "PINGVIN_DISPLAY_FAIL xvnc-exit"; exit 1; fi
+    port_open $RFB && break
+    n=$(wc -l < /tmp/xvnc.log 2>/dev/null || echo 0); [ "$n" -gt "$shown" ] && { tail -n +$((shown+1)) /tmp/xvnc.log | sed 's/^/  xvnc: /'; shown=$n; }
+    [ $((i % 10)) = 9 ] && echo "  …жду Xvnc $(( (i+1)/2 )) с"
+    sleep 0.5; i=$((i+1))
+  done
+  port_open $RFB || { echo "Xvnc не открыл порт $RFB за $T с. /tmp/xvnc.log:"; tail -25 /tmp/xvnc.log; kill $XP 2>/dev/null; echo "PINGVIN_DISPLAY_FAIL xvnc-timeout"; exit 1; }
+  echo "Xvnc готов (pid $XP)"
+fi
+# openbox: все окна разворачиваются на весь экран; перезапуск, если оконный менеджер умер
+if command -v openbox >/dev/null; then
+  rc=/root/.config/openbox/rc.xml
+  if ! grep -q pingvin-rules-2 "$rc" 2>/dev/null && [ -f /etc/xdg/openbox/rc.xml ]; then
+    mkdir -p /root/.config/openbox
+    # обычные окна — на весь экран; диалоги и окна Wine — по центру и не шире экрана; рабочий стол — снизу
+    sed 's|</applications>|<!-- pingvin-rules-2 --><application class="*" type="normal"><maximized>yes</maximized><focus>yes</focus></application><application class="*" type="dialog"><position force="yes"><x>center</x><y>center</y></position><focus>yes</focus></application><application class="*.exe"><position force="yes"><x>center</x><y>center</y></position><maximized>yes</maximized></application><application class="explorer.exe"><decor>no</decor><maximized>yes</maximized></application><application class="pingvin-desktop" type="desktop"><layer>below</layer><skip_taskbar>yes</skip_taskbar></application></applications>|;s|<placement>.*|&|' /etc/xdg/openbox/rc.xml > "$rc"
+    sed -i 's|<policy>Smart</policy>|<policy>Smart</policy><center>yes</center>|' "$rc"
+    DISPLAY=:$N openbox --reconfigure 2>/dev/null
+  fi
+  pingvin-assoc 2>/dev/null
+  ob=0; for d in /proc/[0-9]*; do case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in openbox*|*/openbox*) ob=1;; esac; done
+  [ $ob = 1 ] || { DISPLAY=:$N setsid openbox </dev/null >/tmp/openbox.log 2>&1 9>&- & }
+fi
+# рабочий стол с обоями и значками программ
+if [ "${PINGVIN_NODESK:-0}" != 1 ] && python3 -c 'import tkinter' 2>/dev/null; then
+  dk=0; for d in /proc/[0-9]*; do case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *pingvin-deskicons*) dk=1;; esac; done
+  [ $dk = 1 ] || { DISPLAY=:$N setsid python3 /usr/local/bin/pingvin-deskicons </dev/null >/tmp/deskicons.log 2>&1 9>&- & }
+fi
+if [ "$PINGVIN_NOVNC" = 1 ] && command -v websockify >/dev/null && ! port_open $PORT; then
+  websockify --web /usr/share/novnc 127.0.0.1:$PORT 127.0.0.1:$RFB >/tmp/websockify.log 2>&1 9>&- &
+fi
+exec 9>&-
+echo "PINGVIN_DISPLAY_READY $RFB"
+[ -n "$1" ] && exec pingvin-gui --no-open "$@"
+# proot --kill-on-exit kills Xvnc when this script exits; the app keeps it alive with PINGVIN_HOLD=1
+[ "$PINGVIN_HOLD" = 1 ] && exec sleep infinity
+exit 0

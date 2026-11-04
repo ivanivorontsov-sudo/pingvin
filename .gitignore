@@ -1,0 +1,17 @@
+build/
+.gradle/
+local.properties
+*.jks
+*.keystore
+signing.properties
+app/src/main/assets/stub.apk
+dist/
+*.apk
+*.idsig
+key.properties
+*.p12
+*.pem
+app/src/main/assets/wine-aarch64.tar.xz
+app/src/main/assets/gui-debs-aarch64.tar
+app/src/main/assets/browser-debs-aarch64.tar
+app/src/main/assets/rootfs-aarch64.tar.xz

@@ -1,0 +1,16 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'ru.ivan.pingvin.stub'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'ru.ivan.pingvin.app.zzzzzzzzzzzzzzzz'
+        minSdk 26
+        targetSdk 28
+        versionCode 1
+        versionName '1.0'
+    }
+    buildTypes { release { minifyEnabled false; shrinkResources false } }
+    aaptOptions { cruncherEnabled false; noCompress 'png' }
+    lint { checkReleaseBuilds false; abortOnError false }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}

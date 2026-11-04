@@ -1,0 +1,27 @@
+#!/bin/bash
+# Ассоциации файлов (xdg) и меню openbox. Идемпотентно.
+A=/usr/share/applications; mkdir -p $A /root/.config/openbox /root/.local/share/applications
+printf '[Desktop Entry]\nType=Application\nName=Windows-программа (Wine)\nName[ru]=Запустить через Wine\nExec=pingvin-open %%f\nNoDisplay=true\nMimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-msi;application/x-ms-installer;application/x-msdos-program;application/x-ms-shortcut;application/x-bat;\n' > $A/pingvin-wine-open.desktop
+printf '[Desktop Entry]\nType=Application\nName=Установить пакет\nExec=pingvin-open %%f\nNoDisplay=true\nMimeType=application/vnd.debian.binary-package;application/x-deb;application/vnd.appimage;application/x-iso9660-appimage;\n' > $A/pingvin-pkg-open.desktop
+printf '[Desktop Entry]\nType=Application\nName=Открыть в эмуляторе\nExec=pingvin-open %%f\nNoDisplay=true\nMimeType=%s;\n' "$(echo application/x-gameboy-rom application/x-gameboy-color-rom application/x-gba-rom application/x-nes-rom application/x-snes-rom application/x-genesis-rom application/x-sms-rom application/x-gamegear-rom application/x-n64-rom application/x-nintendo-ds-rom application/x-cue application/x-atari-2600-rom | tr ' ' ';')" > $A/pingvin-rom-open.desktop
+m=/root/.config/mimeapps.list
+{ echo '[Default Applications]'
+  for t in application/x-ms-dos-executable application/x-msdownload application/vnd.microsoft.portable-executable application/x-msi application/x-ms-installer application/x-msdos-program application/x-bat; do echo "$t=pingvin-wine-open.desktop"; done
+  for t in application/vnd.debian.binary-package application/x-deb application/vnd.appimage application/x-iso9660-appimage; do echo "$t=pingvin-pkg-open.desktop"; done
+  for t in application/x-gameboy-rom application/x-gameboy-color-rom application/x-gba-rom application/x-nes-rom application/x-snes-rom application/x-genesis-rom application/x-sms-rom application/x-gamegear-rom application/x-n64-rom application/x-nintendo-ds-rom application/x-cue application/x-atari-2600-rom; do echo "$t=pingvin-rom-open.desktop"; done
+} > $m; cp $m /root/.local/share/applications/mimeapps.list
+command -v update-desktop-database >/dev/null && update-desktop-database $A 2>/dev/null
+cat > /root/.config/openbox/menu.xml <<'X'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="pingvin-apps" label="Программы" execute="pingvin-obmenu"/>
+<menu id="root-menu" label="Пингвин">
+  <menu id="pingvin-apps"/>
+  <item label="Браузер Linux (Firefox)"><action name="Execute"><command>pingvin-browser</command></action></item>
+  <item label="Браузер Windows (K-Meleon)"><action name="Execute"><command>pingvin-winbrowser</command></action></item>
+  <item label="Эмуляторы консолей"><action name="Execute"><command>pingvin-emu --menu</command></action></item>
+  <item label="Терминал (xterm)"><action name="Execute"><command>xterm</command></action></item>
+  <separator/><item label="Обновить меню"><action name="Reconfigure"/></item>
+</menu>
+</openbox_menu>
+X

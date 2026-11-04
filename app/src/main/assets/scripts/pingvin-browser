@@ -1,0 +1,53 @@
+#!/bin/bash
+# pingvin-browser [url] — встроенный Firefox ESR (arm64) в окне дисплея «Пингвина».
+ENS=; [ "$1" = --ensure-only ] && { ENS=1; shift; }
+URL=${1:-https://www.wikipedia.org/}
+if [ -z "$DISPLAY" ] && [ -z "$ENS" ]; then exec pingvin-gui pingvin-browser "$@"; fi
+if [ ! -x /usr/lib/firefox-esr/firefox-esr ]; then
+  D=/opt/pingvin/xdebs
+  for i in $(seq 120); do [ -f $D/.complete ] && break; [ $i = 1 ] && echo "Жду распаковки встроенного браузера…"; sleep 1; done
+  if ls $D/*.deb >/dev/null 2>&1; then
+    echo "Устанавливаю встроенный Firefox ESR ($(ls $D/*.deb | wc -l) пакетов)…"
+    for d in $D/*.deb; do timeout 300 dpkg-deb -x "$d" / || echo "  ошибка: $d"; done
+    ldconfig 2>/dev/null; rm -rf $D
+  else
+    echo "Встроенного браузера нет — ставлю из сети"; apt-get update -q; apt-get install -y --no-install-recommends firefox-esr || exit 1
+  fi
+fi
+[ -n "$ENS" ] && exit 0
+export MOZ_ENABLE_WAYLAND=0 NO_AT_BRIDGE=1 GTK_A11Y=none
+eval "$(pingvin-ffprefs --env)"   # песочница/однопроцессный — только если включено в настройках
+[ -s /etc/machine-id ] || head -c16 /dev/urandom | od -An -tx1 | tr -d " \n" > /etc/machine-id
+P=${PINGVIN_FF_PROFILE:-/root/.pingvin/firefox}; mkdir -p $P   # «Тихо» и др. копии — свой профиль
+pingvin-ffprefs "$P"   # user.js + policies (в т.ч. для уже существующего профиля)
+# Один экземпляр на профиль: раньше повторный запуск (при переключении Linux/Windows) удалял lock и
+# стартовал второй Firefox на том же профиле — вкладки ломались/падали. Теперь URL уходит в уже открытый.
+ff=${PINGVIN_FF_BIN:-/usr/lib/firefox-esr/firefox-esr}
+mine() { for d in /proc/[0-9]*; do c=$(tr '\0' ' ' < $d/cmdline 2>/dev/null); case "$c" in *firefox-esr*--profile\ $P*) echo ${d#/proc/};; esac; done; }
+if [ -n "$(mine)" ]; then
+  echo "Firefox уже открыт — открываю вкладку в нём"
+  $ff --profile $P --new-tab "$URL" 2>/dev/null && exit 0
+  echo "Старый Firefox не отвечает — перезапускаю"; kill $(mine) 2>/dev/null; sleep 2; kill -9 $(mine) 2>/dev/null
+fi
+# осиротевшие content-процессы от убитого Firefox
+# (1.10–1.12 убивали ВСЕ -contentproc — если поиск «своего» Firefox не срабатывал, это валило вкладки живого окна.
+#  Теперь только сироты: родитель которых уже не firefox-esr.)
+for d in /proc/[0-9]*; do case "$(tr '\0' ' ' < $d/cmdline 2>/dev/null)" in *firefox-esr*-contentproc*)
+  pp=$(awk '/^PPid:/{print $2}' $d/status 2>/dev/null); case "$(tr '\0' ' ' < /proc/$pp/cmdline 2>/dev/null)" in *firefox-esr*) ;; *) kill -9 ${d#/proc/} 2>/dev/null;; esac;; esac; done
+rm -f $P/lock $P/.parentlock
+# Авто-фолбэк: seccomp-песочница Firefox конфликтует с перехватом SIGSYS в proot (termux/proot#139).
+# Если вкладки падают — включаем «без песочницы» автоматически (многопроцессность остаётся) и перезапускаем.
+# Отключить авто-фолбэк: файл /root/.pingvin/ff-noauto.
+L=/root/.pingvin/firefox.log
+CR='exited on signal (11|31)|seccomp sandbox violation|Exiting due to channel error|\[Child [0-9]+.*(Crash|ABORT)|SIGSYS'
+auto() { [ ! -e /root/.pingvin/ff-noauto ] && [ ! -e /root/.pingvin/ff-nosandbox ] && [ ! -e /root/.pingvin/ff-nosandbox.auto ]; }
+$ff --profile $P "$URL" > >(tee $L) 2>&1 & FP=$!
+while kill -0 $FP 2>/dev/null; do
+  sleep 2
+  if auto && grep -qE "$CR" $L 2>/dev/null; then
+    echo "Вкладки Firefox упали (песочница не совместима с proot) — включаю «без песочницы» и перезапускаю."
+    touch /root/.pingvin/ff-nosandbox.auto; kill $FP; sleep 2; kill -9 $FP 2>/dev/null; kill -9 $(mine) 2>/dev/null
+    rm -f $P/lock $P/.parentlock; exec "$0" "$URL"
+  fi
+done
+wait $FP

@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+# pingvin-dl URL OUT | pingvin-dl --gh OWNER/REPO REGEX  (печатает URL последнего релиза)  — без curl/wget
+import sys, os, re, json, time, urllib.request
+UA = {'User-Agent': 'Pingvin/1.10'}
+def get(u, t=60): return urllib.request.urlopen(urllib.request.Request(u, headers=UA), timeout=t)
+if sys.argv[1] == '--gh':
+    repo, pat = sys.argv[2], sys.argv[3]
+    try:
+        rel = json.load(get(f'https://api.github.com/repos/{repo}/releases/latest'))
+        names = [(a['name'], a['browser_download_url']) for a in rel.get('assets', [])]
+    except Exception:  # лимит API — читаем обычную страницу релиза
+        tag = get(f'https://github.com/{repo}/releases/latest').geturl().rstrip('/').split('/')[-1]
+        html = get(f'https://github.com/{repo}/releases/expanded_assets/{tag}').read().decode('utf-8', 'ignore')
+        names = [(h.split('/')[-1], 'https://github.com' + h) for h in re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', html)]
+    for n, u in names:
+        if re.search(pat, n): print(u); sys.exit(0)
+    sys.exit('нет файла по шаблону ' + pat)
+url, out = sys.argv[1], sys.argv[2]
+for att in range(3):
+    try:
+        r = get(url); tot = int(r.headers.get('Content-Length') or 0); n = 0; last = 0
+        with open(out + '.part', 'wb') as f:
+            while True:
+                b = r.read(1 << 16)
+                if not b: break
+                f.write(b); n += len(b)
+                if time.time() - last > 2:
+                    last = time.time(); print(f'  {n >> 20} МБ' + (f' из {tot >> 20} МБ' if tot else ''), flush=True)
+        os.replace(out + '.part', out); print(f'  скачано {n >> 20} МБ'); sys.exit(0)
+    except Exception as e:
+        print('  ошибка загрузки:', e, flush=True); time.sleep(3)
+sys.exit(1)

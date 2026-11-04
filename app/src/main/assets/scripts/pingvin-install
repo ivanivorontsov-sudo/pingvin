@@ -1,0 +1,95 @@
+#!/bin/bash
+# pingvin-install PKG | file.deb | file.AppImage | archive.tar.* | file.exe|.msi [name]
+set -e
+export DEBIAN_FRONTEND=noninteractive
+A=/root/.pingvin/apps; mkdir -p "$A"
+src="$1"; [ -z "$src" ] && { echo "usage: pingvin-install pkg|file.deb|file.AppImage|file.tar.gz [name]"; exit 1; }
+aptup() { if [ ! -f /var/lib/apt/periodic/pingvin-updated ]; then apt-get update || echo "apt update: some mirrors failed"; mkdir -p /var/lib/apt/periodic; touch /var/lib/apt/periodic/pingvin-updated; fi; }
+reg() { printf 'name=%s\ncmd=%s\ngui=%s\nlibs=%s\n' "$1" "$2" "$3" "$4" > "$A/$1.properties"; echo "PINGVIN_APP $1 -> $2 (gui=$3)"; [ "$3" = 1 ] && pingvin-wrap "$1" "$2"; true; }
+guiof() { if ldd "$1" 2>/dev/null | grep -qE 'libX11|libgtk|libQt|libSDL|libwayland'; then echo 1; return; fi
+  if head -c 4 "$1" 2>/dev/null | grep -q '^#!' && grep -qE 'tkinter|Tkinter|from gi|PyQt|PySide|wx|pygame|import tk' "$1" 2>/dev/null; then echo 1; return; fi
+  if [ -n "$2" ] && dpkg -L "$2" 2>/dev/null | grep -q '/applications/.*\.desktop$'; then echo 1; return; fi
+  echo 0; }
+lc=$(echo "$src" | tr A-Z a-z | sed -E "s#^.*/inner-##")
+[ -n "$PINGVIN_RM" ] && trap 'rm -f "$PINGVIN_RM"' EXIT
+# Сборка на Firefox (Тихо для ПК и т.п.): firefox/ + application.ini (+ distribution/policies.json)
+isff() { local a; a=$(find "$1" -maxdepth 3 -name application.ini 2>/dev/null | head -1); [ -n "$a" ] && grep -qi '^Name=Firefox' "$a" && { [ -e "$(dirname "$a")/firefox" ] || [ -e "$(dirname "$a")/firefox.exe" ]; }; }
+ffinst() { local n="$2" t=""; find "$1" -maxdepth 3 -iname 'README-TIHO*' | grep -q . && { n=${3:-tiho}; t="Тихо"; }
+  echo "Это сборка на Firefox ESR (x86_64). Ставлю её с родным arm64 Firefox ESR Пингвина — быстрее и без box64/Wine."
+  PINGVIN_TITLE="${t:-$n}" pingvin-tiho --install "$1" "$n"; local r=$?; rm -rf "$1"; return $r; }
+# Распакованный каталог (zip/tar): вложенный архив/установщик -> рекурсивно; Firefox-сборка; Windows-портативная; Linux
+postx() { local D="$1" n="$2" inner cnt
+  cnt=$(find "$D" -mindepth 1 -maxdepth 2 -not -name '*.txt' -not -name '*.md' -not -type d | wc -l)
+  inner=$(find "$D" -maxdepth 2 -type f \( -iname '*.zip' -o -iname '*.tar*' -o -iname '*.tgz' -o -iname '*.txz' -o -iname '*.deb' -o -iname '*.appimage' -o -iname '*.msi' -o -iname '*.exe' \) | head -2)
+  if [ "$cnt" -le 2 ] && [ -n "$inner" ] && [ "$(echo "$inner" | wc -l)" = 1 ]; then
+    echo "Внутри архива: $(basename "$inner") — устанавливаю его"
+    nf="/root/.pingvin/inner-$(basename "$inner")"; mv -f "$inner" "$nf"; rm -rf "$D"; PINGVIN_RM="$nf" exec "$0" "$nf" "$3"; fi
+  if isff "$D"; then ffinst "$D" "$n" "$3"; echo PINGVIN_OK; exit 0; fi
+  local exe; exe=$(find "$D" -maxdepth 4 -type f -iname '*.exe' 2>/dev/null | grep -viE 'unins|setup|install|update|crash|helper|maintenance|vc_?redist|dxsetup' | while read -r f; do echo "$(stat -c %s "$f") $f"; done | sort -rn | head -1 | cut -d' ' -f2-)
+  if [ -n "$exe" ] && ! pingvin-pickexe "$D" "$n" >/dev/null 2>&1; then
+    rm -rf "/root/WinApps/$n"; mkdir -p "/root/WinApps"; mv "$D" "/root/WinApps/$n"; f="/root/WinApps/$n/${exe#$D/}"
+    w=/usr/local/bin/win-$n; printf '#!/bin/sh\nexec pingvin-wine "%s" "$@"\n' "$f" > "$w"; chmod +x "$w"
+    reg "$n" "$w" 1; desk "$n" "$w"; echo "Портативная Windows-программа: $(basename "$f") через Wine"; echo PINGVIN_OK; exit 0; fi
+  rm -rf "/opt/$n"; mv "$D" "/opt/$n"
+  exe=$(pingvin-pickexe "/opt/$n" "$n"); [ -z "$exe" ] && { echo "no executable found"; exit 2; }
+  g=$(guiof "$exe"); [ "$(od -An -tu2 -j18 -N2 "$exe" | tr -d ' ')" = 62 ] && [ "$(uname -m)" != x86_64 ] && g=1
+  reg "$n" "$exe" "$g"; [ "$g" = 1 ] && desk "$n" "/usr/local/bin/$n"; echo PINGVIN_OK; exit 0; }
+# ярлык для меню и рабочего стола
+desk() { mkdir -p /usr/share/applications/pingvin; printf '[Desktop Entry]\nType=Application\nName=%s\nExec=%s\nIcon=application-x-executable\nTerminal=false\n' "$1" "$2" > "/usr/share/applications/pingvin/$1.desktop"; command -v pingvin-menu-refresh >/dev/null && pingvin-menu-refresh; true; }
+unz() { if command -v unzip >/dev/null; then unzip -q -o "$1" -d "$2"; elif command -v bsdtar >/dev/null; then bsdtar -xf "$1" -C "$2"; else python3 -c 'import sys,zipfile,os
+z=zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2])
+for i in z.infolist():
+  m=(i.external_attr>>16)&0o777
+  if m: os.chmod(os.path.join(sys.argv[2],i.filename),m)' "$1" "$2"; fi; }
+if [ -f "$src" ]; then
+ src=$(readlink -f "$src")
+ case "$lc" in
+  *.deb)
+    aptup; pkg=$(dpkg-deb -f "$src" Package); arch=$(dpkg-deb -f "$src" Architecture)
+    me=$(dpkg --print-architecture)
+    if [ "$arch" != all ] && [ "$arch" != "$me" ]; then
+      echo "Other architecture $arch: unpacking to /opt/$pkg (runs via box64)"
+      which box64 || pingvin-install box64
+      mkdir -p "/opt/$pkg"; dpkg-deb -x "$src" "/opt/$pkg"
+      exe=$(pingvin-pickexe "/opt/$pkg" "$pkg")
+      [ -z "$exe" ] && { echo "no executable found"; exit 2; }
+      reg "$pkg" "$exe" 1 "/opt/$pkg/usr/lib:/opt/$pkg/usr/lib/x86_64-linux-gnu"
+    else
+      apt-get install -y "$src"
+      exe=$(dpkg -L "$pkg" | grep -E '^/usr/(s?bin|games)/[^/]+$' | head -1); [ -z "$exe" ] && exe=$pkg
+      reg "$pkg" "$exe" "$(guiof "$exe" "$pkg")"
+    fi ;;
+  *.appimage)
+    name=${2:-$(basename "$src" | sed -E 's/\.appimage$//I; s/(-|_)v?[0-9].*//' | tr 'A-Z ' 'a-z-')}
+    which unsquashfs || { aptup; apt-get install -y squashfs-tools; }
+    shoff=$(od -An -tu8 -j40 -N8 "$src" | tr -d ' '); shes=$(od -An -tu2 -j58 -N2 "$src" | tr -d ' '); shn=$(od -An -tu2 -j60 -N2 "$src" | tr -d ' ')
+    off=$((shoff + shes*shn))
+    unsquashfs -f -q -n -o "$off" -d "/opt/$name" "$src" >/dev/null
+    reg "$name" "/opt/$name/AppRun" 1 ;;
+  *.tar|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tar.zst)
+    name=${2:-$(basename "$src" | sed -E 's/^inner-//; s/\.(tar.*|tgz|txz)$//; s/(-|_)v?[0-9].*//; s/-(windows|linux|win(32|64)?|x64|x86_64|amd64|portable).*//I' | tr 'A-Z ' 'a-z-')}
+    case "$lc" in *.zst) which zstd || { aptup; apt-get install -y zstd; };; esac
+    mkdir -p /root/.pingvin; tmp=$(mktemp -d /root/.pingvin/unpack.XXXXXX); tar -xaf "$src" -C "$tmp"
+    postx "$tmp" "$name" "$2" ;;
+  *.zip)
+    name=${2:-$(basename "$src" | sed -E 's/^inner-//; s/\.zip$//I; s/(-|_)v?[0-9].*//; s/-(windows|linux|win(32|64)?|x64|x86_64|amd64|portable).*//I' | tr 'A-Z ' 'a-z-')}
+    mkdir -p /root/.pingvin; tmp=$(mktemp -d /root/.pingvin/unpack.XXXXXX); echo "Распаковываю $(basename "$src")…"; unz "$src" "$tmp"
+    postx "$tmp" "$name" "$2" ;;
+  *.exe|*.com) [ -n "$DOSCHK" ] || { pingvin-dos --is-dos "$src" && { DOSCHK=1; d=/root/DOS/$(basename "$src" | sed -E 's/\.[^.]*$//' | tr 'A-Z ' 'a-z_'); mkdir -p "$d"; cp -f "$src" "$d/"; exec pingvin-dos "$d/$(basename "$src")"; }; } ;;&
+  *.exe|*.msi)
+    name=${2:-$(basename "$src" | sed -E 's/\.(exe|msi)$//I; s/(-|_| )v?[0-9].*//' | tr 'A-Z ' 'a-z-')}
+    mkdir -p "/root/WinApps/$name"; cp -f "$src" "/root/WinApps/$name/"; f="/root/WinApps/$name/$(basename "$src")"
+    w=/usr/local/bin/win-$name; printf '#!/bin/sh\nexec pingvin-wine "%s" "$@"\n' "$f" > "$w"; chmod +x "$w"
+    reg "$name" "$w" 1
+    echo "Windows-программа: запуск через Wine (pingvin-wine). Первый запуск скачает Wine." ;;
+  *) echo "Unknown format: $src"; exit 1;;
+ esac
+else
+  case "$src:$(uname -m)" in box64:x86_64) echo "box64 not needed on x86_64"; echo PINGVIN_OK; exit 0;; esac
+  aptup
+  apt-get install -y "$src"
+  exe=$(dpkg -L "$src" 2>/dev/null | grep -E '^/usr/(s?bin|games)/[^/]+$' | grep -i "$src" | head -1)
+  [ -z "$exe" ] && exe=$(dpkg -L "$src" 2>/dev/null | grep -E '^/usr/(s?bin|games)/[^/]+$' | head -1)
+  [ -n "$exe" ] && reg "$src" "$exe" "$(guiof "$exe" "$src")"
+fi
+echo "PINGVIN_OK"

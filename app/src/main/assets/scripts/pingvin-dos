@@ -1,0 +1,198 @@
+#!/bin/bash
+# pingvin-dos — DOS-программы и игры через DOSBox-X (Debian, динамическое ядро ARM64, Win 3.x/9x, ISO/IMG, SB16/GUS/MT-32).
+#   pingvin-dos ФАЙЛ.exe|.com|.bat | ПАПКА | архив.zip | диск.iso|.cue | дискета.img|.ima   — запустить (папка монтируется как C:)
+#   pingvin-dos --menu     — список DOS-программ и профилей (Tk)      pingvin-dos --shell — пустой DOS (C: = /root/DOS)
+#   pingvin-dos --profile NAME — изменить профиль                     pingvin-dos --install — поставить DOSBox-X
+# Профиль на программу: /root/DOS/.profiles/NAME.conf (ключ=значение), общий — default.conf.
+[ -z "$DISPLAY" ] && case "$1" in --install|--is-dos) ;; *) exec pingvin-gui pingvin-dos "$@";; esac
+D=/root/DOS; PR=$D/.profiles; mkdir -p "$D" "$PR" "$D/saves"
+log() { echo "[dos] $*"; }
+isdos() { # MZ без PE/NE-заголовка → DOS (LE/LX — DOS/4GW тоже DOS)
+  python3 - "$1" <<'P'
+import sys,struct
+try:
+  d=open(sys.argv[1],'rb').read(4096)
+except Exception: sys.exit(2)
+n=sys.argv[1].lower()
+if n.endswith('.com'): sys.exit(0)
+if d[:2] not in (b'MZ',b'ZM'): sys.exit(1)
+off=struct.unpack('<I',d[0x3c:0x40])[0] if len(d)>=0x40 else 0
+rel=struct.unpack('<H',d[0x18:0x1a])[0]
+if rel>=0x40 and 0<off<len(d)-4 and d[off:off+2] in (b'PE',b'NE'): sys.exit(1)
+if 0<off and off>=len(d):
+  f=open(sys.argv[1],'rb'); f.seek(off); s=f.read(2)
+  if s in (b'PE',b'NE'): sys.exit(1)
+sys.exit(0)
+P
+}
+[ "$1" = --is-dos ] && { isdos "$2"; exit $?; }
+ensure() { command -v dosbox-x >/dev/null && return 0
+  log "Ставлю DOSBox-X (один раз, ~15 МБ + библиотеки)…"
+  { apt-get install -y --no-install-recommends dosbox-x || { apt-get update -q && apt-get install -y --no-install-recommends dosbox-x; }; } 2>&1 | tail -3
+  command -v dosbox-x >/dev/null || { log "✖ DOSBox-X не установился (нужен интернет)."; return 1; }; }
+[ "$1" = --install ] && { ensure; exit $?; }
+slug() { basename "$1" | sed -E 's/\.(zip|exe|com|bat|iso|cue|img|ima)$//I' | tr 'A-Z ' 'a-z_' | tr -cd 'a-z0-9_.-' | cut -c1-40; }
+# --- выбрать исполняемый файл в папке игры
+pickexe() { local dir="$1"
+  find "$dir" -maxdepth 3 -type f \( -iname '*.exe' -o -iname '*.com' -o -iname '*.bat' \) 2>/dev/null |
+  grep -viE '/(setup|install|instal|config|setsound|sound|uninst|readme|dos4gw|pmode|cwsdpmi|unzip|pkunzip|lha|cdrom|vesa|univbe|mouse)[^/]*$' |
+  while IFS= read -r f; do b=$(basename "$f" | tr A-Z a-z); s=$(stat -c %s "$f"); d=$(( $(echo "${f#$dir/}" | tr -cd / | wc -c) ))
+    sc=$(( s / 1024 - d * 400 )); case "$b" in *.bat) sc=$((sc+300));; *.com) sc=$((sc+50));; esac
+    case "$b" in "$(basename "$dir" | tr A-Z a-z | cut -c1-8)"*) sc=$((sc+2000));; win.com) sc=$((sc+5000));; esac
+    echo "$sc $f"; done | sort -rn | head -1 | cut -d' ' -f2-; }
+prof() { local n="$1" k="$2" def="$3" v
+  v=$(sed -n "s/^$k=//p" "$PR/$n.conf" 2>/dev/null | tail -1); [ -z "$v" ] && v=$(sed -n "s/^$k=//p" "$PR/default.conf" 2>/dev/null | tail -1); echo "${v:-$def}"; }
+[ -s "$PR/default.conf" ] || cat > "$PR/default.conf" <<'C'
+# Общий профиль DOS (свой для программы — /root/DOS/.profiles/ИМЯ.conf, те же ключи)
+# core: dynamic (быстро, ARM64-динамическое ядро) | normal (совместимость) | auto
+core=dynamic
+# cycles: auto | max | число (напр. 3000 — старые игры, 20000 — 486, 60000+ — Pentium)
+cycles=auto
+# machine: svga_s3 (VESA/SVGA) | vgaonly | ega | cga | tandy | pcjr | hercules
+machine=svga_s3
+memsize=32
+# sound: sb16 | sbpro2 | sb1 | gus | none ; midi: mt32 (нужны ROM в /root/DOS/mt32-roms) | fluidsynth | none
+sound=sb16
+midi=fluidsynth
+ems=true
+xms=true
+umb=true
+# 866 + ru — русские буквы/раскладка (переключение раскладки: левый Alt+Shift в DOSBox-X keyb)
+codepage=866
+keyb=ru
+# fullscreen=false + окно во весь экран (настоящий fullscreen SDL ломается без XRandR в Xvnc)
+fullscreen=false
+aspect=true
+# exit=1 — закрыть DOSBox после выхода из программы
+exit=1
+C
+conf() { local n="$1" c="$2" mid sb gus=false RES
+  RES=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2}'); [ -z "$RES" ] && RES=$(python3 -c 'import tkinter as t;r=t.Tk();print("%dx%d"%(r.winfo_screenwidth(),r.winfo_screenheight()))' 2>/dev/null); RES=${RES:-desktop}
+  sb=$(prof "$n" sound sb16); mid=$(prof "$n" midi fluidsynth)
+  [ "$sb" = gus ] && { gus=true; sb=sb16; }; [ "$sb" = none ] && sb=none
+  case "$mid" in mt32) [ -d $D/mt32-roms ] || mid=fluidsynth;; esac
+  [ "$mid" = fluidsynth ] && ! ls /usr/share/sounds/sf2/*.sf2 >/dev/null 2>&1 && mid=none
+  local sf=$(ls /usr/share/sounds/sf2/*.sf2 2>/dev/null | head -1)
+  cat > "$c" <<C
+[sdl]
+fullscreen=$(prof "$n" fullscreen false)
+fullresolution=$RES
+windowresolution=$RES
+output=texture
+texture.renderer=software
+autolock=false
+autolock_feedback=none
+mouse_emulation=locked
+showmenu=false
+[dosbox]
+machine=$(prof "$n" machine svga_s3)
+memsize=$(prof "$n" memsize 32)
+title=$n
+quit warning=false
+working directory option=custom
+working directory default=$D/saves
+[render]
+aspect=$(prof "$n" aspect true)
+scaler=none
+# texture: SDL2 растягивает картинку на весь экран телефона с сохранением пропорций
+[cpu]
+core=$(prof "$n" core dynamic)
+cputype=auto
+cycles=$(prof "$n" cycles auto)
+[mixer]
+rate=22050
+[sblaster]
+sbtype=$sb
+oplmode=auto
+[gus]
+gus=$gus
+[midi]
+mpu401=intelligent
+mididevice=$( [ "$mid" = none ] && echo default || echo $mid )
+fluid.soundfont=$sf
+mt32.romdir=$D/mt32-roms
+[dos]
+xms=$(prof "$n" xms true)
+ems=$(prof "$n" ems true)
+umb=$(prof "$n" umb true)
+lfn=true
+keyboardlayout=$(prof "$n" keyb ru)
+[config]
+country=7,$(prof "$n" codepage 866)
+[autoexec]
+C
+  # без звукового сервера в proot — тихий вывод вместо ошибки
+  [ -z "$PULSE_SERVER" ] && export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}; }
+shortcut() { local n="$1" t="$2" A=/root/.local/share/applications; mkdir -p $A
+  [ -e "$A/dos-$n.desktop" ] && return
+  printf '[Desktop Entry]\nType=Application\nName=%s (DOS)\nExec=pingvin-dos "%s"\nIcon=dosbox-x\nCategories=Game;DOS;\n' "$n" "$t" > "$A/dos-$n.desktop"
+  pingvin-menu-refresh 2>/dev/null; log "Добавлено в меню и на рабочий стол: $n"; }
+run() { local t="$1" n dir exe ac c lc
+  t=$(readlink -f "$t"); lc=$(echo "$t" | tr A-Z a-z); n=$(slug "$t"); c=/tmp/pingvin-dos-$n.conf
+  ensure || return 1
+  case "$lc" in
+    *.zip) dir=$D/$n; [ -d "$dir" ] || { log "Распаковываю в $dir"; mkdir -p "$dir"; python3 -c 'import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$t" "$dir" || 7z x -y -o"$dir" "$t" >/dev/null; }
+      # один вложенный каталог — заходим в него
+      [ "$(ls "$dir" | wc -l)" = 1 ] && [ -d "$dir/$(ls "$dir")" ] && dir="$dir/$(ls "$dir")"
+      t=$dir; lc=dir;;
+  esac
+  conf "$n" "$c"
+  ac() { echo "$*" >> "$c"; }
+  case "$lc" in
+    *.iso|*.cue) ac "mount c \"$D\""; ac "imgmount d \"$t\" -t iso"; ac "d:"; ac "dir /w"; shortcut "$n" "$t";;
+    *.img|*.ima) if [ $(stat -c %s "$t") -le 2949120 ]; then ac "imgmount a \"$t\" -t floppy"; ac "mount c \"$D\""; ac "a:"; ac "dir /w"; else ac "imgmount c \"$t\""; ac "boot c:"; fi; shortcut "$n" "$t";;
+    *.exe|*.com|*.bat) dir=$(dirname "$t"); ac "mount c \"$dir\" -freesize 512"
+      for i in "$dir"/*.iso "$dir"/*.cue; do [ -e "$i" ] && { ac "imgmount d \"$i\" -t iso"; break; }; done
+      ac "c:"; ac "$(basename "$t")"; [ "$(prof "$n" exit 1)" = 1 ] && ac "exit"
+      case "$(basename "$lc")" in setup*|install*) ;; *) shortcut "$n" "$t";; esac;;
+    *) dir=$t; [ -d "$dir" ] || { log "✖ Не найдено: $t"; return 1; }
+      exe=$(pickexe "$dir"); ac "mount c \"$dir\" -freesize 512"
+      for i in "$dir"/*.iso "$dir"/*.cue; do [ -e "$i" ] && { ac "imgmount d \"$i\" -t iso"; break; }; done
+      ac "c:"
+      if [ -n "$exe" ]; then rel=${exe#$dir/}; sub=$(dirname "$rel"); [ "$sub" != . ] && ac "cd \\$(echo "$sub" | tr / '\\\\')"
+        ac "$(basename "$exe")"; [ "$(prof "$n" exit 1)" = 1 ] && ac "exit"; log "Запускаю $rel"
+      else ac "dir /w"; fi
+      shortcut "$n" "$t";;
+  esac
+  log "DOSBox-X: профиль $n (core=$(prof "$n" core dynamic), cycles=$(prof "$n" cycles auto), machine=$(prof "$n" machine svga_s3)). Изменить: pingvin-dos --profile $n"
+  cd "$D/saves"; exec dosbox-x -conf "$c" -fastlaunch -nopromptfolder -nomenu 2>&1 | grep -vE '^(LOG:|ALSA)' ; }
+menu() { python3 - <<'P'
+import os,glob,subprocess,tkinter as tk
+from tkinter import messagebox
+D='/root/DOS';PR=D+'/.profiles'
+r=tk.Tk();r.title('DOS-программы (DOSBox-X)')
+lb=tk.Listbox(r,font=('DejaVu Sans',14));lb.pack(fill='both',expand=1)
+ents=[]
+def load():
+  lb.delete(0,'end');ents.clear()
+  for f in sorted(glob.glob(os.path.expanduser('~/.local/share/applications/dos-*.desktop'))):
+    t=open(f).read();n=t.split('Name=')[1].split('\n')[0];e=t.split('Exec=pingvin-dos ')[1].split('\n')[0].strip('"')
+    ents.append((os.path.basename(f)[4:-8],e));lb.insert('end',n)
+load()
+def sel(): i=lb.curselection();return ents[i[0]] if i else None
+def run():
+  s=sel()
+  if s: subprocess.Popen(['pingvin-dos',s[1]])
+def edit(name):
+  p=PR+'/'+name+'.conf'
+  if not os.path.exists(p): open(p,'w').write('# свой профиль для '+name+' (пусто = как default.conf)\n#cycles=max\n#core=normal\n#machine=vgaonly\n#sound=sb16\n')
+  w=tk.Toplevel(r);w.title('Профиль '+name);t=tk.Text(w,width=60,height=20);t.pack(fill='both',expand=1)
+  t.insert('1.0',open(p).read())
+  def save(): open(p,'w').write(t.get('1.0','end'));w.destroy()
+  tk.Button(w,text='Сохранить',command=save).pack(fill='x')
+  if name!='default': tk.Label(w,text='Ключи: '+open(PR+'/default.conf').read().count('=').__str__()+' в default.conf — core, cycles, machine, memsize, sound, midi, ems, xms, umb, codepage, keyb, fullscreen, aspect, exit').pack()
+f=tk.Frame(r);f.pack(fill='x')
+for t,c in (('▶ Запустить',run),('Профиль',lambda:(sel() and edit(sel()[0]))),('Общий профиль',lambda:edit('default')),
+            ('Пустой DOS',lambda:subprocess.Popen(['pingvin-dos','--shell'])),('Обновить',load),('Закрыть',r.destroy)):
+  tk.Button(f,text=t,command=c,font=('DejaVu Sans',12)).pack(side='left',expand=1,fill='x')
+tk.Label(r,text='Положите игру (папку/zip/iso) в /root/DOS или откройте .exe/.com/.bat — DOS-файлы сами откроются в DOSBox-X.').pack()
+r.mainloop()
+P
+}
+case "$1" in
+  --menu|"") A=/root/.local/share/applications; mkdir -p $A; [ -e $A/pingvin-dos.desktop ] || printf '[Desktop Entry]\nType=Application\nName=DOS-программы\nExec=pingvin-dos --menu\nIcon=dosbox-x\nCategories=Game;\n' > $A/pingvin-dos.desktop
+    command -v dosbox-x >/dev/null || ensure; menu;;
+  --profile) n=$2; f=$PR/$n.conf; [ -e "$f" ] || cp $PR/default.conf "$f"; exec pingvin-open "$f" 2>/dev/null || cat "$f";;
+  --shell) ensure || exit 1; c=/tmp/pingvin-dos-shell.conf; conf shell $c; echo "mount c \"$D\"" >> $c; echo "c:" >> $c; cd $D/saves; exec dosbox-x -conf $c -fastlaunch -nopromptfolder -nomenu;;
+  *) run "$1";;
+esac

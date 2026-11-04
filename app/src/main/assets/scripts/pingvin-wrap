@@ -1,0 +1,9 @@
+#!/bin/sh
+# pingvin-wrap NAME CMD | --all : GUI-программа NAME -> /usr/local/bin/NAME, автозапуск X-сервера и дисплея
+mk() { n="$1"; c="$2"; w=/usr/local/bin/$n
+  [ "$c" = "$w" ] && return; case "$c" in /usr/local/bin/*) return;; esac
+  printf '#!/bin/sh\n# pingvin gui wrapper\nexec pingvin-gui "%s" "$@"\n' "$c" > "$w"; chmod +x "$w"; }
+if [ "$1" = --all ]; then
+  for f in /root/.pingvin/apps/*.properties; do [ -f "$f" ] || continue
+    grep -q '^gui=1' "$f" && mk "$(sed -n 's/^name=//p' "$f")" "$(sed -n 's/^cmd=//p' "$f")"; done
+else mk "$1" "$2"; fi

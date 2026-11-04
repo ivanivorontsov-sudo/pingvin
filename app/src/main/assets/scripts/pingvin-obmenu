@@ -1,0 +1,11 @@
+#!/bin/bash
+# openbox pipe-menu: программы из .desktop (обновляется при каждом открытии меню)
+x() { sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g'; }
+echo '<openbox_pipe_menu>'
+find /root/.local/share/applications /usr/share/applications -name '*.desktop' 2>/dev/null | sort | while read -r f; do
+  grep -qiE '^(NoDisplay|Hidden)=true' "$f" && continue
+  grep -q '^Type=Application' "$f" || continue
+  n=$(grep -m1 '^Name\[ru\]=' "$f" | cut -d= -f2-); [ -z "$n" ] && n=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
+  echo "<item label=\"$(echo "$n" | x)\"><action name=\"Execute\"><command>pingvin-launch \"$(echo "$f" | x)\"</command></action></item>"
+done
+echo '</openbox_pipe_menu>'

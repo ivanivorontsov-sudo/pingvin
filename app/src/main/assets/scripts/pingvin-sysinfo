@@ -1,0 +1,15 @@
+#!/bin/bash
+# Диагностика: SoC, размер страницы, адресное пространство, Wine.
+echo "== Пингвин: диагностика системы =="
+echo "Арх: $(uname -m)   ядро: $(uname -r)"
+echo "Страница памяти: $(getconf PAGESIZE) байт (Wine/FEX/Box64 нужны 4096)"
+h=$(grep -m1 -i 'Hardware' /proc/cpuinfo | cut -d: -f2); echo "SoC (cpuinfo): ${h:-нет данных}"
+echo "Ядер: $(nproc); CPU part: $(grep -i 'CPU part' /proc/cpuinfo | sort -u | awk '{print $NF}' | tr '\n' ' ')"
+echo "Флаги CPU: $(grep -m1 -i Features /proc/cpuinfo | cut -d: -f2)"
+top=$(awk '{split($1,a,"-"); print a[2]}' /proc/self/maps 2>/dev/null | sort | tail -1)
+[ -n "$top" ] && { b=$(python3 -c "import math;print(math.ceil(math.log2(int('$top',16))))" 2>/dev/null); echo "Верх адресов процесса: 0x$top (~${b:-?} бит; 39 — обычный Android)"; }
+echo "Wine: $( [ -f /opt/pingvin/.wine-ready ] && echo "встроенный Hangover распакован" || echo "ещё не распакован")"
+[ -x /usr/bin/wine ] && WINEDEBUG=-all timeout 10 wine --version 2>/dev/null
+echo "Firefox: $( [ -x /usr/lib/firefox-esr/firefox-esr ] && echo установлен || ( [ -d /opt/pingvin/xdebs ] && echo 'встроен, ставится при первом запуске' || echo нет))"
+echo "Сеть: $(timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null && echo 'TCP 1.1.1.1:443 ok' || echo 'нет связи')"
+getent hosts deb.debian.org >/dev/null && echo "DNS: ok" || echo "DNS: не работает"

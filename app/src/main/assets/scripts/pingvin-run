@@ -1,0 +1,37 @@
+#!/bin/sh
+# pingvin-run PROG [args] - runs a Linux program; foreign x86_64/i386 ELF -> box64
+[ -z "$1" ] && { echo "usage: pingvin-run prog [args]"; exit 1; }
+p="$1"; shift
+cfg=/root/.pingvin/apps/$p.properties
+if [ -f "$cfg" ]; then
+  c=$(sed -n 's/^cmd=//p' "$cfg"); l=$(sed -n 's/^libs=//p' "$cfg")
+  if [ -n "$l" ]; then export BOX64_LD_LIBRARY_PATH="$l"; export LD_LIBRARY_PATH="$l"; fi
+  case "$c" in /opt/*/AppRun) APPDIR=$(dirname "$c"); export APPDIR; cd "$APPDIR";; esac
+  p="$c"
+fi
+case "$p" in */*) f="$p";; *) f=$(command -v "$p" 2>/dev/null);; esac
+[ -n "$f" ] && [ -f "$f" ] || { echo "pingvin-run: not found: $p" >&2; exit 127; }
+real=$(readlink -f "$f")
+# Неверно выбранный исполняемый (chrome-sandbox, crashpad, .so) — выбираем заново и чиним запись
+case "$(basename "$real")" in chrome-sandbox|chrome_crashpad_handler|crashpad_handler|*.so|*.so.*)
+  top=$(echo "$real" | sed -E 's#^(/opt/[^/]+)/.*#\1#'); n=$(pingvin-pickexe "$top" "$(basename "$top")") && {
+    echo "pingvin-run: «$(basename "$real")» не программа — запускаю $n" >&2
+    [ -f "$cfg" ] && sed -i "s#^cmd=.*#cmd=$n#" "$cfg"; f="$n"; real=$(readlink -f "$n"); };;
+esac
+# Electron/Chromium: под proot нет песочницы и /dev/shm мал
+ed=$(dirname "$real")
+if [ -e "$ed/chrome-sandbox" ] || [ -e "$ed/resources/app.asar" ] || [ -e "$ed/v8_context_snapshot.bin" ] || [ -e "$ed/chrome_crashpad_handler" ]; then
+  export ELECTRON_DISABLE_SANDBOX=1 ELECTRON_DISABLE_GPU=1
+  set -- --no-sandbox --disable-gpu --disable-dev-shm-usage --disable-gpu-sandbox "$@"
+fi
+magic=$(od -An -tx1 -N4 "$real" 2>/dev/null | tr -d ' \n')
+if [ "$magic" = "7f454c46" ]; then
+  m=$(od -An -tu2 -j18 -N2 "$real" | tr -d ' ')
+  export BOX64_LD_LIBRARY_PATH="$(dirname "$real")${BOX64_LD_LIBRARY_PATH:+:$BOX64_LD_LIBRARY_PATH}"
+  host=$(uname -m)
+  case "$m" in
+    62) [ "$host" = x86_64 ] || { command -v box64 >/dev/null || pingvin-install box64; exec box64 "$real" "$@"; } ;;
+    3)  case "$host" in x86_64|i?86) ;; *) command -v box64 >/dev/null || pingvin-install box64; exec box64 "$real" "$@";; esac ;;
+  esac
+fi
+exec "$f" "$@"

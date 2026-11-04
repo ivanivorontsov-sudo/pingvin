@@ -1,0 +1,60 @@
+#!/bin/bash
+# pingvin-tiho — браузер «Тихо» для ПК (Firefox ESR + политики приватности Тихо).
+#   pingvin-tiho [url]                 — запуск
+#   pingvin-tiho --install DIR [name]  — установить из распакованной сборки (Linux x86_64 tar.gz или Windows x64 zip)
+# Сборки Тихо для ПК — это официальный Firefox ESR x86_64 + distribution/policies.json. Гнать x86_64 Firefox через
+# box64 (или firefox.exe через Wine+FEX) на телефоне — медленно и ломается в proot. Поэтому берём из сборки только
+# политики Тихо и запускаем их на встроенном родном arm64 Firefox ESR: отдельная копия /opt/NAME (симлинки на
+# /usr/lib/firefox-esr, свой бинарь и свой distribution/) и отдельный профиль.
+FF=${PINGVIN_FF_DIR:-/usr/lib/firefox-esr}
+if [ "$1" = --install ]; then
+  src="${2%/}"; name=${3:-tiho}; T=/opt/$name; title=${PINGVIN_TITLE:-Тихо}
+  pol=$(find "$src" -maxdepth 4 -path '*/distribution/policies.json' 2>/dev/null | head -1)
+  mkdir -p /root/.pingvin/$name.d
+  [ -n "$pol" ] && cp -f "$pol" /root/.pingvin/$name.d/policies.json
+  rd=$(find "$src" -maxdepth 3 -iname 'README-TIHO*' 2>/dev/null | head -1); [ -n "$rd" ] && cp -f "$rd" /root/.pingvin/$name.d/README.txt
+  echo "$title" > /root/.pingvin/$name.d/title
+  rm -rf "$T"; "$0" --build "$name" || exit 2
+  w=/usr/local/bin/$name; printf '#!/bin/sh\nexec pingvin-tiho --run %s "$@"\n' "$name" > "$w"; chmod +x "$w"
+  mkdir -p /root/.pingvin/apps /usr/share/applications/pingvin
+  printf 'name=%s\ncmd=%s\ngui=1\nlibs=\n' "$name" "$w" > /root/.pingvin/apps/$name.properties
+  ic=firefox-esr; [ -f /root/.pingvin/$name.d/icon.png ] && ic=/root/.pingvin/$name.d/icon.png
+  cat > /usr/share/applications/pingvin/$name.desktop <<D
+[Desktop Entry]
+Type=Application
+Name=$title
+Comment=Приватный браузер $title (Firefox ESR + uBlock Origin)
+Exec=$w %u
+Icon=$ic
+Terminal=false
+Categories=Network;WebBrowser;
+D
+  command -v pingvin-menu-refresh >/dev/null && pingvin-menu-refresh
+  echo "PINGVIN_APP $name -> $w (gui=1)"
+  echo "«$title» установлен: родной arm64 Firefox ESR с политиками $title ($([ -n "$pol" ] && echo "политики взяты из сборки" || echo "политик в сборке нет")). Ярлык — в меню и на рабочем столе."
+  exit 0
+fi
+if [ "$1" = --build ]; then  # собрать /opt/NAME поверх встроенного Firefox
+  name=$2; T=/opt/$name
+  [ -x "$FF/firefox-esr" ] || { echo "Нет встроенного Firefox ($FF)"; exit 1; }
+  mkdir -p "$T"
+  for f in "$FF"/* "$FF"/.[!.]*; do [ -e "$f" ] || continue; b=$(basename "$f")
+    case "$b" in firefox-esr|firefox-bin|firefox|distribution) ;; *) ln -sfn "$f" "$T/$b";; esac; done
+  # бинарь — настоящей копией: Firefox ищет distribution/ рядом с реальным путём исполняемого файла
+  cp -f "$FF/firefox-esr" "$T/firefox-esr"; ln -sfn firefox-esr "$T/firefox-bin"
+  rm -rf "$T/distribution"; mkdir -p "$T/distribution"
+  [ -d "$FF/distribution/" ] && cp -rL "$FF/distribution/." "$T/distribution/" 2>/dev/null
+  [ -f /root/.pingvin/$name.d/policies.json ] && cp -f /root/.pingvin/$name.d/policies.json "$T/distribution/policies.json"
+  cmp -s "$FF/firefox-esr" "$T/firefox-esr" && echo "$FF/firefox-esr" > "$T/.pingvin-base"
+  exit 0
+fi
+name=tiho; [ "$1" = --run ] && { name=$2; shift 2; }
+T=/opt/$name
+if [ -z "$DISPLAY" ]; then exec pingvin-gui pingvin-tiho --run "$name" "$@"; fi
+# встроенный Firefox мог обновиться/доустановиться — пересобрать копию
+if [ ! -x "$FF/firefox-esr" ] || ! cmp -s "$FF/firefox-esr" "$T/firefox-esr"; then
+  [ -x "$FF/firefox-esr" ] || PINGVIN_FF_ENSURE=1 pingvin-browser --ensure-only
+  "$0" --build "$name" || exit 1
+fi
+export PINGVIN_FF_BIN="$T/firefox-esr" PINGVIN_FF_PROFILE="/root/.pingvin/$name-profile"
+exec pingvin-browser "${1:-about:home}"

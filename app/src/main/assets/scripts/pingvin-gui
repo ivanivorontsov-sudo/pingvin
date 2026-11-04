@@ -1,0 +1,17 @@
+#!/bin/bash
+# pingvin-gui CMD [args]: X-сервером владеет приложение (DisplayActivity), чтобы он не умирал вместе с программой.
+N=${PINGVIN_DISPLAY_NUM:-1}; RFB=$((5900+N))
+open=1; [ "$1" = "--no-open" ] && { open=0; shift; }
+[ -z "$1" ] && { echo "usage: pingvin-gui program [args]"; exit 1; }
+up() { [ -S /tmp/.X11-unix/X$N ] && timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$RFB" 2>/dev/null; }
+if [ $open = 1 ] && [ -n "$PINGVIN_APP" ]; then
+  q=/root/.pingvin/queue; mkdir -p $q; id=$(date +%s%N); printf 'display\n-\n' > $q/$id.tmp && mv $q/$id.tmp $q/$id.req
+  up || echo "Жду дисплей (первый раз распаковываются пакеты, до 5 мин)…"
+  for i in $(seq 600); do up && break; [ $((i % 20)) = 0 ] && echo "  …$((i/2)) с"; sleep 0.5; done
+fi
+if ! up; then  # нет приложения — поднимаем сами
+  pingvin-desktop 2>&1 | tee /tmp/pingvin-desktop.log | grep -v PINGVIN_DISPLAY_READY
+  grep -q PINGVIN_DISPLAY_READY /tmp/pingvin-desktop.log || exit 1
+fi
+export DISPLAY=:$N
+exec pingvin-run "$@"

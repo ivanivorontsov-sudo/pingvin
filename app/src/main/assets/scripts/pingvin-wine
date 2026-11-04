@@ -1,0 +1,204 @@
+#!/bin/bash
+# pingvin-wine file.exe|file.msi|wine-command [args] | --setup (проверка) | --reset (пересоздать префикс) | --prepare
+# Встроенный Hangover Wine 11.16: родной arm64 Wine; x86_64 — через FEX (arm64ec), 32-бит x86 — Box64 (по умолч.) или FEX (PINGVIN_WINE_I386=fex).
+[ -z "$1" ] && { echo "usage: pingvin-wine file.exe [args] | --setup | --reset"; exit 1; }
+# 1.13: DOS-программы (MZ без PE/NE, .com, .bat без PE рядом) → DOSBox-X
+case "$1" in *.[eE][xX][eE]|*.[cC][oO][mM]) [ -f "$1" ] && pingvin-dos --is-dos "$1" && exec pingvin-dos "$1";;
+  *.[bB][aA][tT]) [ -f "$1" ] && { pe=0; for x in "$(dirname "$1")"/*.[eE][xX][eE]; do [ -f "$x" ] && ! pingvin-dos --is-dos "$x" && pe=1 && break; done; [ $pe = 0 ] && exec pingvin-dos "$1"; };; esac
+case "$1" in --setup|--reset|--prepare|--mono) ;; *) [ -z "$DISPLAY" ] && exec pingvin-gui pingvin-wine "$@";; esac
+log() { echo "[wine] $*"; }
+PVER=hangover-11.16
+W=/usr/lib/wine
+KEYS="$W/aarch64-unix/ntdll.so $W/aarch64-unix/wine $W/aarch64-windows/ntdll.dll $W/aarch64-windows/kernel32.dll $W/aarch64-windows/cmd.exe $W/aarch64-windows/wowbox64.dll $W/aarch64-windows/libarm64ecfex.dll $W/i386-windows/kernel32.dll $W/i386-windows/cmd.exe /usr/bin/wineserver"
+export WINEPREFIX=${WINEPREFIX:-/root/.wine}
+BLOG=/root/.pingvin/wineboot.log; mkdir -p /root/.pingvin
+diagnose() {
+  echo "----- диагностика Wine -----"
+  echo "страница: $(getconf PAGESIZE)  ядро: $(uname -r)  wine: $(wine --version 2>&1 | head -1)"
+  for f in $KEYS; do [ -s "$f" ] && echo "  есть  $f" || echo "  НЕТ   $f"; done
+  for f in system.reg .pingvin-prefix drive_c/windows/system32/kernel32.dll drive_c/windows/system32/cmd.exe drive_c/windows/syswow64/kernel32.dll drive_c/windows/syswow64/cmd.exe; do
+    [ -e "$WINEPREFIX/$f" ] && echo "  есть  \$WINEPREFIX/$f" || echo "  НЕТ   \$WINEPREFIX/$f"; done
+  [ -f "$BLOG" ] && { echo "--- хвост $BLOG:"; grep -v '^\[BOX64\]' "$BLOG" | tail -40; }
+  echo "Полный лог: $BLOG (долгое нажатие в терминале → «Поделиться»)"
+}
+missing_wine() { for f in $KEYS; do [ -s "$f" ] || echo "$f"; done; }
+prefix_ok() {
+  [ "$(cat "$WINEPREFIX/.pingvin-prefix" 2>/dev/null)" = "$PVER" ] && [ -f "$WINEPREFIX/system.reg" ] &&
+  [ -s "$WINEPREFIX/drive_c/windows/system32/kernel32.dll" ] && [ -s "$WINEPREFIX/drive_c/windows/syswow64/kernel32.dll" ] && [ -s "$WINEPREFIX/drive_c/windows/syswow64/cmd.exe" ]
+}
+host=$(uname -m)
+if [ "$host" = aarch64 ] && [ ! -f /opt/pingvin/.wine-ready ]; then
+  log "Жду распаковки встроенного Wine (первый запуск после обновления, 1–3 мин)…"
+  for i in $(seq 600); do [ -f /opt/pingvin/.wine-ready ] && break; sleep 1; [ $((i % 30)) = 0 ] && log "  …$i с"; done
+fi
+m=$(missing_wine)
+if [ -n "$m" ]; then
+  log "✖ Встроенный Wine распакован не полностью. Не хватает:"; echo "$m" | sed 's/^/    /'
+  mkdir -p /opt/pingvin; touch /opt/pingvin/.wine-reextract; rm -f /opt/pingvin/.wine-ready
+  log "Закройте «Пингвин» полностью и откройте снова — он перераспакует Wine (1–3 мин), затем повторите."
+  exit 2
+fi
+ps=$(getconf PAGESIZE 2>/dev/null)
+[ -n "$ps" ] && [ "$ps" != 4096 ] && log "ВНИМАНИЕ: размер страницы памяти $ps байт (не 4К) — Wine/FEX/Box64 могут не работать."
+case "${PINGVIN_WINE_I386:-box64}" in fex) export HODLL=libwow64fex.dll;; *) export HODLL=wowbox64.dll;; esac
+export BOX64_LOG=0 BOX64_NOBANNER=1 WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-}"
+# Песочница Chromium/Firefox (Windows) не работает под Wine — отключаем
+export MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GPU_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_VR_SANDBOX=1
+[ -s /etc/machine-id ] || head -c16 /dev/urandom | od -An -tx1 | tr -d " \n" > /etc/machine-id
+
+move_old() { [ -e "$WINEPREFIX" ] || return 0; wineserver -k 2>/dev/null; local d="$WINEPREFIX-old-$(date +%Y%m%d-%H%M%S)"; mv "$WINEPREFIX" "$d" && log "Старый префикс перенесён в $d"; }
+PTAR=/opt/pingvin/wine-prefix.tar.xz
+create_prefix() {
+  : > "$BLOG"
+  if [ -s "$PTAR" ]; then
+    log "Распаковываю готовый префикс Windows из приложения (≈1 мин)…"
+    mkdir -p "$WINEPREFIX" && tar -x -I pingvin-xz -f "$PTAR" -C "$WINEPREFIX" >>"$BLOG" 2>&1
+    # DLL в префиксе = копии встроенных из /usr/lib/wine (в архив не кладём — экономим ~950 МБ)
+    while IFS="$(printf '\t')" read -r rel src; do [ -n "$rel" ] && cp -f "$src" "$WINEPREFIX/$rel" 2>>"$BLOG"; done < "$WINEPREFIX/.pingvin-dedup"
+    if prefix_ok_files; then echo "$PVER" > "$WINEPREFIX/.pingvin-prefix"; log "Префикс готов (из архива)"; return 0; fi
+    log "⚠ Готовый префикс не подошёл — создаю через wineboot"; wineserver -k 2>/dev/null; rm -rf "$WINEPREFIX"
+  fi
+  log "Создаю префикс Windows (Hangover) через wineboot. Под эмуляцией 3–10 мин, не закрывайте…"
+  # Без диалогов установки Wine Mono / Gecko (они качают сотни МБ и тормозят первый запуск)
+  ( export WINEDLLOVERRIDES="mscoree=;mshtml=;winemenubuilder.exe=d"; unset DISPLAY WAYLAND_DISPLAY
+    WINEDEBUG=err+all,warn+module wineboot -i >>"$BLOG" 2>&1; echo "wineboot код $? (timeout службы — не ошибка, ждём wineserver)" >>"$BLOG"
+    WINEDEBUG=-all wineserver -w >>"$BLOG" 2>&1 ) &
+  local pid=$! t=0
+  while kill -0 $pid 2>/dev/null; do
+    sleep 5; t=$((t+5))
+    [ $((t % 15)) = 0 ] && log "  …$t с: $(grep -v '^\[BOX64\]' "$BLOG" | tail -1 | cut -c1-110)"
+    [ $t -ge 2400 ] && { log "wineboot идёт дольше 40 мин — останавливаю и проверяю файлы"; wineserver -k; kill $pid 2>/dev/null; break; }
+  done
+  wait $pid 2>/dev/null
+  if prefix_ok_files; then echo "$PVER" > "$WINEPREFIX/.pingvin-prefix"; log "Префикс готов ($t с)"; return 0; fi
+  log "✖ Префикс не создан."; diagnose; return 1
+}
+prefix_ok_files() { [ -f "$WINEPREFIX/system.reg" ] && [ -s "$WINEPREFIX/drive_c/windows/system32/kernel32.dll" ] && [ -s "$WINEPREFIX/drive_c/windows/syswow64/kernel32.dll" ] && [ -s "$WINEPREFIX/drive_c/windows/syswow64/cmd.exe" ]; }
+# OpenGL для игр/программ: Wine грузит libEGL/libGL (Mesa llvmpipe) — доустанавливаем автоматически
+ensure_gl() {
+  ls /usr/lib/*-linux-gnu/libEGL.so.1 /usr/lib/*-linux-gnu/dri/swrast_dri.so >/dev/null 2>&1 && return 0
+  ls /usr/lib/*-linux-gnu/libEGL.so.1 >/dev/null 2>&1 && ls /usr/lib/*-linux-gnu/dri/*_dri.so >/dev/null 2>&1 && return 0
+  mkdir -p /root/.pingvin; echo "[wine] Устанавливаю OpenGL (Mesa llvmpipe: libegl1 libgl1 libgl1-mesa-dri)…"
+  (apt-get install -y libegl1 libgl1 libgl1-mesa-dri >/root/.pingvin/gl-install.log 2>&1 || { apt-get update >>/root/.pingvin/gl-install.log 2>&1 && apt-get install -y libegl1 libgl1 libgl1-mesa-dri >>/root/.pingvin/gl-install.log 2>&1; }) \
+    && echo "[wine] OpenGL установлен" || echo "[wine] ⚠ OpenGL не установился (нужен интернет), см. /root/.pingvin/gl-install.log"
+}
+# Wine не трогает режимы экрана Xvnc (RandR/VidMode) и не грузит USB/Bluetooth-драйверы (их нет в proot)
+safe_reg() {
+  [ -e "$WINEPREFIX/.pingvin-safe-x11" ] && return 0
+  wine reg add 'HKCU\Software\Wine\X11 Driver' /v UseXRandR /d N /f >/dev/null 2>&1
+  wine reg add 'HKCU\Software\Wine\X11 Driver' /v UseXVidMode /d N /f >/dev/null 2>&1
+  for s in wineusb winebth; do wine reg add "HKLM\System\CurrentControlSet\Services\$s" /v Start /t REG_DWORD /d 4 /f >/dev/null 2>&1; done
+  touch "$WINEPREFIX/.pingvin-safe-x11"
+}
+# Снимок: exe/lnk в типичных местах установки + wine .desktop
+winesnap() { local C="$WINEPREFIX/drive_c"
+  find "$C"/Program\ Files* "$C"/users/*/AppData/Local "$C"/users/*/Desktop "$C"/users/Public/Desktop \
+       "$C"/ProgramData/Microsoft/Windows/Start\ Menu "$C"/users/*/AppData/Roaming/Microsoft/Windows/Start\ Menu \
+       /root/.local/share/applications/wine \( -iname '*.exe' -o -iname '*.lnk' -o -name '*.desktop' \) 2>/dev/null | grep -vE '/AppData/Local/(Temp|Microsoft|Mozilla|cache)/' | sort; }
+# После установщика: главный exe новой программы → пункт меню и значок на рабочем столе вместо установщика
+postinstall() { local n="$1" new main app nm D=/root/.local/share/applications
+  winesnap > /tmp/pingvin-snap-after
+  new=$(comm -13 /tmp/pingvin-snap-before /tmp/pingvin-snap-after | grep -viE 'unins|uninst|setup|install|update|crash|helper|redist|vc_?redist|dotnet|elevate|squirrel')
+  [ -z "$new" ] && { log "Новых программ после установщика не найдено."; return; }
+  # 1) ярлык .lnk → путь к exe (через строку в бинарном .lnk)
+  while IFS= read -r l; do [ -n "$l" ] || continue
+    t=$(python3 -c 'import re,sys;d=open(sys.argv[1],"rb").read();m=re.findall(rb"[A-Za-z]:\\[^\x00]{3,250}?\.exe",d,re.I) or [x.encode() for x in re.findall(r"[A-Za-z]:\\[^\x00]{3,250}?\.exe",d.decode("utf-16-le","ignore"),re.I)];print(m[0].decode("latin1") if m else "")' "$l" 2>/dev/null)
+    [ -n "$t" ] && { u=$(wine winepath -u "$t" 2>/dev/null | tr -d '\r'); [ -f "$u" ] && { main=$u; nm=$(basename "$l" .lnk); break; }; }
+  done <<< "$(echo "$new" | grep -i '\.lnk$')"
+  # 2) иначе — самый большой новый exe
+  [ -z "$main" ] && main=$(echo "$new" | grep -i '\.exe$' | while IFS= read -r e; do echo "$(stat -c %s "$e") $e"; done | sort -rn | head -1 | cut -d' ' -f2-)
+  [ -z "$main" ] && { log "Не нашёл exe установленной программы."; return; }
+  nm=${nm:-$(basename "$main" .exe)}; app=$(echo "$n" | tr 'A-Z ' 'a-z-' | sed -E 's/[-_]?(setup|installer|install)[-_]?//g; s/-+$//'); app=${app:-$(echo "$nm" | tr 'A-Z ' 'a-z-')}
+  mkdir -p $D; ic=""
+  for i in /root/.local/share/icons/hicolor/*/apps/*.png; do case "$(basename "$i" | tr A-Z a-z)" in *$(echo "$nm" | tr A-Z a-z | cut -c1-6)*) ic=$i;; esac; done
+  cat > "$D/pingvin-win-$app.desktop" <<D
+[Desktop Entry]
+Type=Application
+Name=$nm
+Exec=pingvin-wine "$main"
+Path=$(dirname "$main")
+${ic:+Icon=$ic}
+Categories=Wine;
+D
+  printf '#!/bin/sh\nexec pingvin-wine "%s" "$@"\n' "$main" > /usr/local/bin/win-$app; chmod +x /usr/local/bin/win-$app
+  # запись установщика (pingvin-install) теперь запускает программу, а не установщик
+  for p in /root/.pingvin/apps/*.properties; do [ -e "$p" ] || continue
+    c=$(sed -n 's/^cmd=//p' "$p"); case "$c" in /usr/local/bin/win-*) grep -qi -- "$(basename "${f:-$n}")" "$c" 2>/dev/null &&
+      printf '#!/bin/sh\nexec pingvin-wine "%s" "$@"\n' "$main" > "$c" && sed -i "s|^name=.*|name=$nm|" "$p";; esac; done
+  # дубли от winemenubuilder с тем же exe не нужны; ярлык «установщик» убрать
+  grep -lis "setup\|install" $D/wine/Programs/*.desktop $D/wine/*.desktop 2>/dev/null | xargs -r rm -f
+  log "✔ Установлена программа «$nm»: $main — добавлена в меню и на рабочий стол."; }
+ensure_prefix() {
+  ensure_gl
+  exec 9>/tmp/pingvin-wine.lock
+  if ! flock -n 9; then log "Префикс уже готовится другим окном — жду…"; flock 9; fi
+  # зависшие от прошлого раза wine/wineboot (окно «configuration is being updated») — убиваем
+  if [ ! -e "$WINEPREFIX/.pingvin-prefix" ] || [ "$1" = reset ]; then wineserver -k 2>/dev/null; pkill -f 'wineboot|winedevice|services.exe|explorer.exe /desktop' 2>/dev/null; sleep 1; fi
+  if [ "$1" = reset ]; then move_old; elif ! prefix_ok; then
+    [ -e "$WINEPREFIX" ] && log "Префикс $WINEPREFIX не от Hangover или неполный (старый Kron4ek из 1.6?) — пересоздаю."
+    move_old
+  fi
+  prefix_ok || create_prefix || { flock -u 9; return 1; }
+  # Wine не должен «обновлять конфигурацию» при каждом запуске (под эмуляцией это висит минутами)
+  [ "$(cat "$WINEPREFIX/.update-timestamp" 2>/dev/null)" = disable ] || { wineserver -k 2>/dev/null; echo disable > "$WINEPREFIX/.update-timestamp"; }
+  safe_reg
+  flock -u 9
+}
+case "$1" in --reset) ensure_prefix reset || exit 1; set -- --setup;; *) ensure_prefix || exit 1;; esac
+[ "$1" = --prepare ] && exit 0
+if [ "$1" = --mono ]; then
+  MV=11.3.0; M=/root/.cache/wine-mono-$MV-x86.msi; mkdir -p /root/.cache
+  if [ ! -s "$M" ]; then log "Скачиваю Wine Mono $MV (~80 МБ)…"
+    pingvin-dl "https://dl.winehq.org/wine/wine-mono/$MV/wine-mono-$MV-x86.msi" "$M" || { log "✖ Не скачалось (нужен интернет)"; exit 1; }; fi
+  log "Устанавливаю Wine Mono (.NET), 2–10 мин…"
+  WINEDEBUG=-all wine msiexec /i "$M" /qn; rc=$?; wineserver -w
+  if [ $rc = 0 ] && [ -e "$WINEPREFIX/drive_c/windows/mono" -o -e "$WINEPREFIX/drive_c/windows/Microsoft.NET" ]; then touch "$WINEPREFIX/.pingvin-mono"; log "✔ Wine Mono установлен, .NET-программы включены"; exit 0; fi
+  log "✖ Установка Wine Mono не удалась (код $rc)"; exit 1
+fi
+if [ "$1" = --setup ]; then
+  fail=0
+  log "Проверка: 64-бит Windows cmd →"; o=$(WINEDEBUG=err+all timeout 300 wine cmd /c echo ok-arm64 2>&1 | grep -v '^\[BOX64\]'); echo "$o" | grep -E '^ok|^wine:|could not|failed to open' | tail -5
+  echo "$o" | grep -q '^ok-arm64' || { fail=1; echo "$o" >> "$BLOG"; }
+  log "Проверка: 32-бит (x86 через ${PINGVIN_WINE_I386:-box64}) →"; o=$(WINEDEBUG=err+all timeout 300 wine 'C:\windows\syswow64\cmd.exe' /c echo ok-i386 2>&1 | grep -v '^\[BOX64\]'); echo "$o" | grep -E '^ok|^wine:|could not|failed to open' | tail -5
+  echo "$o" | grep -q '^ok-i386' || { fail=1; echo "$o" >> "$BLOG"; }
+  if [ $fail = 0 ]; then log "✔ Wine готов (Hangover 11.16, страница памяти ${ps:-?})"; exit 0; fi
+  log "✖ Проверки не прошли."; diagnose; log "Попробуйте «Сбросить Wine» (pingvin-wine --reset)."; exit 1
+fi
+case "$(echo "$1" | tr A-Z a-z)" in
+  *.msi) f=$(readlink -f "$1"); shift; set -- msiexec /i "$f" "$@";;
+  *.exe|*.bat|*.com) f=$(readlink -f "$1"); shift; cd "$(dirname "$f")"
+    # Electron/Chromium (resources/app.asar): под Wine+эмуляцией GPU-процесс и песочница падают → окно не реагирует,
+    # renderer перезапускается и снова показывает стартовую страницу. Свои флаги: /root/.pingvin/electron-flags
+    if [ -e resources/app.asar ] || [ -d resources/app ] || { [ -e libEGL.dll ] && ls *.pak >/dev/null 2>&1; }; then
+      EF=$(cat /root/.pingvin/electron-flags 2>/dev/null || echo "--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --disable-hang-monitor --disable-features=CalculateNativeWinOcclusion,RendererCodeIntegrity,WinRetrieveSuggestionsOnlyOnDemand --disable-renderer-backgrounding --disable-background-timer-throttling")
+      log "Electron-приложение: запускаю с $EF"
+      set -- "$f" $EF "$@"
+    else set -- "$f" "$@"; fi;;
+esac
+RLOG=/root/.pingvin/wine-run.log
+# Виртуальный рабочий стол Wine (explorer /desktop) пытается менять режим экрана (RandR) и на телефоне
+# валил Xvnc. Поэтому по умолчанию ВЫКЛЮЧЕН; окна держатся в экране правилами openbox.
+# Включить: PINGVIN_WINE_DESKTOP=1 или файл /root/.pingvin/wine-desktop (размер ≤ экрана, кратный 8).
+scr() { xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}' | grep . || xwininfo -root 2>/dev/null | awk '/Width:/{w=$2}/Height:/{h=$2}END{if(w)print w"x"h}' | grep . ||
+  python3 -c 'import tkinter as t;r=t.Tk();print("%dx%d"%(r.winfo_screenwidth(),r.winfo_screenheight()))' 2>/dev/null; }
+wd=${PINGVIN_WINE_DESKTOP:-0}; [ -e /root/.pingvin/wine-desktop ] && wd=1
+if [ "$wd" = 1 ] && [ -n "$DISPLAY" ] && [ "$1" != explorer ]; then
+  G=$(scr); case "$G" in [0-9]*x[0-9]*) W=$(( (${G%x*} - 8) / 8 * 8 )); H=$(( (${G#*x} - 40) / 8 * 8 ))
+    log "Окно Wine: рабочий стол ${W}x${H}"; set -- explorer "/desktop=pingvin,${W}x${H}" "$@";; esac
+fi
+# По умолчанию .NET (Mono) и HTML-движок (Gecko) отключены — иначе Wine предлагает их скачать при каждом запуске
+dflt="mshtml="; [ -e "$WINEPREFIX/.pingvin-mono" ] || dflt="mscoree=;$dflt"
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}$dflt"
+export ELECTRON_DISABLE_SANDBOX=1 ELECTRON_NO_ATTACH_CONSOLE=1   # и для Electron, запущенных установщиком (Squirrel)
+# Windows-Firefox: те же переключатели из настроек Пингвина, что и для Linux
+eval "$(pingvin-ffprefs --env | sed 's/MOZ_FORCE_DISABLE_E10S=[^ ]*//')"; pingvin-ffprefs 2>/dev/null
+# Установщик? Запоминаем, какие exe/ярлыки были до него, чтобы потом заменить пункт «установщик» на саму программу.
+inst="$PINGVIN_INSTALLER"; case "$(basename "${f:-$1}" | tr A-Z a-z)" in *setup*|*install*|*.msi) inst=${inst:-$(basename "${f:-$1}" | sed -E 's/\.(exe|msi)$//I')};; esac
+[ "$1" = msiexec ] && inst=${inst:-$(basename "$f" .msi)}
+[ -n "$inst" ] && { winesnap > /tmp/pingvin-snap-before; log "Установщик «$inst»: после завершения найду установленную программу."; }
+WINEDEBUG=${WINEDEBUG:-err+all} wine "$@" > >(tee "$RLOG") 2>&1; rc=$?
+pingvin-menu-refresh; wineserver -w 2>/dev/null
+[ -n "$inst" ] && postinstall "$inst"
+pingvin-menu-refresh
+if [ $rc != 0 ]; then log "✖ Программа завершилась с кодом $rc. Хвост лога ($RLOG):"; grep -v '^\[BOX64\]' "$RLOG" | tail -30; diagnose; fi
+exit $rc

@@ -1,0 +1,6 @@
+#!/bin/bash
+# pingvin-winbrowser [url] — встроенный Windows-браузер K-Meleon 76 (Goanna) через Wine.
+[ -z "$DISPLAY" ] && exec pingvin-gui pingvin-winbrowser "$@"
+for i in $(seq 600); do [ -f /opt/kmeleon/k-meleon.exe ] && break; [ $i = 1 ] && echo "Жду распаковки встроенного Wine…"; sleep 1; done
+pingvin-wine --prepare || { echo "✖ Wine не готов — см. лог выше (кнопки «Копировать»/«Поделиться»)."; exit 1; }
+exec pingvin-wine /opt/kmeleon/k-meleon.exe "${1:-https://www.wikipedia.org/}"

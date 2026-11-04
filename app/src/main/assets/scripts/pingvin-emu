@@ -1,0 +1,171 @@
+#!/bin/bash
+# pingvin-emu — каталог эмуляторов консолей. Всё качается с официальных источников ВНУТРЬ Linux (не в APK).
+#   pingvin-emu            — список и выбор в терминале
+#   pingvin-emu --menu     — окно-каталог (с рабочего стола)
+#   pingvin-emu list | install ID | remove ID | run ID [ROM]
+E=/opt/emu; B=/usr/local/bin; A=/root/.local/share/applications; MAP=/root/.pingvin/emu-assoc
+mkdir -p $E $A /root/.pingvin /root/ROMs; touch $MAP
+RA=https://buildbot.libretro.com/nightly/linux/aarch64
+# id|название|тип|источник|расширения ROM
+CAT='ra-mgba|RetroArch: Game Boy / GBA (mGBA)|ra|mgba|gba gb gbc
+ra-snes9x|RetroArch: SNES (Snes9x)|ra|snes9x|sfc smc
+ra-genesis|RetroArch: Sega Genesis/Master System/Game Gear (Genesis Plus GX)|ra|genesis_plus_gx|md gen smd sms gg
+ra-nes|RetroArch: NES/Dendy (FCEUmm)|ra|fceumm|nes fds
+ra-psx|RetroArch: PlayStation (PCSX ReARMed)|ra|pcsx_rearmed|cue pbp chd
+ra-n64|RetroArch: Nintendo 64 (Mupen64Plus-Next)|ra|mupen64plus_next|n64 z64 v64
+ra-nds|RetroArch: Nintendo DS (melonDS)|ra|melonds|nds
+ra-psp|RetroArch: PSP (PPSSPP)|ra|ppsspp|cso
+ra-dc|RetroArch: Dreamcast (Flycast)|ra|flycast|cdi gdi
+ra-32x|RetroArch: Sega 32X (PicoDrive)|ra|picodrive|32x
+ra-atari|RetroArch: Atari 2600 (Stella)|ra|stella|a26
+mgba|mGBA (официальный AppImage arm64)|appimage|gh:mgba-emu/mgba:appimage-arm64|gba gb gbc
+ppsspp|PPSSPP — PSP (официальный AppImage arm64)|appimage|gh:hrydgard/ppsspp:anylinux-aarch64\.AppImage$|iso
+duckstation|DuckStation — PlayStation (AppImage arm64)|appimage|https://github.com/stenzek/duckstation/releases/latest/download/DuckStation-arm64.AppImage|bin img
+dolphin|Dolphin — GameCube/Wii (Debian)|deb|dolphin-emu|rvz wbfs gcm wad
+desmume|DeSmuME — Nintendo DS (Debian)|deb|desmume|
+mednafen|Mednafen — много систем (Debian)|deb|mednafen|pce vb ws wsc ngp
+fceux|FCEUX — NES (Debian)|deb|fceux|
+nestopia|Nestopia — NES (Debian)|deb|nestopia|
+stella|Stella — Atari 2600 (Debian)|deb|stella|
+pcsxr|PCSX-Reloaded — PlayStation (Debian)|deb|pcsxr|
+ares|ares — мультисистемный (Debian)|deb|ares|
+hatari|Hatari — Atari ST (Debian)|deb|hatari|st msa
+fsuae|FS-UAE — Amiga (Debian)|deb|fs-uae|adf
+dosbox|DOSBox (Debian)|deb|dosbox|
+scummvm|ScummVM — квесты (Debian)|deb|scummvm|
+ppsspp-win|PPSSPP для Windows ARM64 (через Wine, родной arm64)|win|gh:hrydgard/ppsspp:Windows-ARM64\.zip$|
+snes9x-win|Snes9x для Windows x64 (через Wine + FEX)|win|gh:snes9xgit/snes9x:win32-x64\.zip$|
+mgba-win|mGBA для Windows x64 (через Wine + FEX)|win|gh:mgba-emu/mgba:win64\.7z$|'
+row() { echo "$CAT" | awk -F'|' -v i="$1" '$1==i'; }
+fld() { row "$1" | cut -d'|' -f$2; }
+fixdeps() { # недостающие системные .so → пакеты Debian (libfoo.so.N → libfooN / libfoo-N / …t64)
+  local miss=$(find "$@" -type f \( -perm -u+x -o -name '*.so*' \) -size +10k 2>/dev/null | head -400 | while read -r b; do ldd "$b" 2>/dev/null | awk '/not found/{print $1}'; done | sort -u)
+  local have=" $(find "$@" -name '*.so*' -printf '%f ' 2>/dev/null)"
+  local pk="" so b v c
+  for so in $miss; do case "$have" in *" $so "*) continue;; esac
+    b=${so%%.so*}; v=${so##*.so.}; v=${v%%.*}; [ "$v" = "$so" ] && v=""
+    for c in $b$v ${b}-$v $b${v}t64 ${b}-${v}t64 $b; do apt-cache show "$c" >/dev/null 2>&1 && { pk="$pk $c"; break; }; done
+  done
+  [ -n "$pk" ] && { echo "Ставлю библиотеки:$pk"; apt-get install -y --no-install-recommends $pk || true; }
+  [ -z "$miss" ] || [ -n "$pk" ] || { apt-get update -q >/dev/null 2>&1 && [ -z "$FIXED" ] && FIXED=1 fixdeps "$@"; }; }
+installed() { [ -e $E/$1/.ok ]; }
+url() { case "$1" in gh:*) local r=${1#gh:}; pingvin-dl --gh "${r%%:*}" "${r#*:}";; *) echo "$1";; esac; }
+fetch() { echo "Скачиваю $1"; pingvin-dl "$1" "$2"; }
+listing() { local n=0; echo "$CAT" | while IFS='|' read -r id name kind src ext; do n=$((n+1)); printf '%2d) %-12s %s%s\n' $n "$id" "$name" "$(installed $id && echo '  [установлен]')"; done; }
+shortcut() { # id name exec ext icon
+  local id=$1 name=${2%% (*} ex=$3 ext=$4; name=${name#RetroArch: }
+  printf '[Desktop Entry]\nType=Application\nName=%s\nExec=%s %%f\nIcon=%s\nCategories=Game;Emulator;\nTerminal=false\n' "$name" "$ex" "${5:-applications-games}" > $A/emu-$id.desktop
+  sed -i "/	emu-$id\$/d" $MAP; for x in $ext; do printf '%s\t%s\n' "$x" "emu-$id" >> $MAP; done
+  touch $E/$id/.ok; pingvin-menu-refresh 2>/dev/null; echo "✔ $name: значок в меню и на рабочем столе; ROM-файлы ($ext) открываются им. ROM кладите в /root/ROMs"; }
+ra_base() {
+  [ -x $E/retroarch/retroarch ] && return 0
+  mkdir -p $E/retroarch/cores && cd /tmp || return 1
+  fetch $RA/RetroArch.7z /tmp/ra.7z || return 1
+  rm -rf /tmp/ra && 7z x -y -o/tmp/ra /tmp/ra.7z >/dev/null || return 1
+  local bin=$(find /tmp/ra -type f \( -name retroarch -o -name '*.AppImage' \) | head -1)
+  case "$bin" in *.AppImage) chmod +x "$bin"; (cd /tmp/ra && "$bin" --appimage-extract >/dev/null) && bin=$(find /tmp/ra/squashfs-root -type f -name retroarch | head -1);; esac
+  [ -n "$bin" ] || { echo "в архиве RetroArch нет программы"; return 1; }
+  cp -a "$(dirname "$bin")"/. $E/retroarch/ 2>/dev/null; cp "$bin" $E/retroarch/retroarch; chmod +x $E/retroarch/retroarch
+  [ -d /tmp/ra/squashfs-root/usr/lib ] && cp -a /tmp/ra/squashfs-root/usr/lib $E/retroarch/lib
+  rm -rf /tmp/ra /tmp/ra.7z
+  if ldd $E/retroarch/retroarch 2>/dev/null | grep -q 'not found'; then
+    echo "Ставлю библиотеки для RetroArch (SDL2, PulseAudio, v4l)…"; apt-get update -q || true
+    apt-get install -y --no-install-recommends libsdl2-2.0-0 libpulse0 libv4l-0t64 || apt-get install -y --no-install-recommends libsdl2-2.0-0 libpulse0 libv4l-0
+  fi
+  mkdir -p /root/.config/retroarch; c=/root/.config/retroarch/retroarch.cfg
+  [ -f $c ] || printf 'video_driver = "gl"\naudio_driver = "alsa"\nmenu_driver = "rgui"\nvideo_fullscreen = "false"\ninput_overlay_enable = "true"\nlibretro_directory = "%s/cores"\nrgui_browser_directory = "/root/ROMs"\nsavefile_directory = "/root/ROMs/saves"\n' $E/retroarch > $c
+  cat > $B/retroarch <<X
+#!/bin/bash
+[ -z "\$DISPLAY" ] && exec pingvin-gui retroarch "\$@"
+[ -n "\$PULSE_SERVER" ] || export SDL_AUDIODRIVER=\${SDL_AUDIODRIVER:-dummy}
+export LD_LIBRARY_PATH=$E/retroarch/lib:\$LD_LIBRARY_PATH LIBGL_ALWAYS_SOFTWARE=\${LIBGL_ALWAYS_SOFTWARE:-1}
+exec $E/retroarch/retroarch "\$@"
+X
+  chmod +x $B/retroarch; printf '[Desktop Entry]\nType=Application\nName=RetroArch\nExec=retroarch\nIcon=applications-games\nCategories=Game;\n' > $A/emu-retroarch.desktop; }
+install() {
+  local id=$1; local r=$(row "$id"); [ -n "$r" ] || { echo "нет в каталоге: $id (см. pingvin-emu list)"; return 1; }
+  IFS='|' read -r id name kind src ext <<< "$r"; echo "== Установка: $name"
+  mkdir -p $E/$id
+  case $kind in
+  ra) ra_base || return 1
+      fetch $RA/latest/${src}_libretro.so.zip /tmp/core.zip || return 1
+      python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" /tmp/core.zip $E/retroarch/cores && rm -f /tmp/core.zip || return 1
+      printf '#!/bin/bash\nexec retroarch -L %s "$@"\n' "$E/retroarch/cores/${src}_libretro.so" > $B/emu-$id; chmod +x $B/emu-$id
+      shortcut $id "$name" emu-$id "$ext";;
+  appimage) local u; u=$(url "$src") || return 1; fetch "$u" $E/$id/app.AppImage || return 1; chmod +x $E/$id/app.AppImage
+      (cd $E/$id && rm -rf squashfs-root && ./app.AppImage --appimage-extract >/dev/null 2>&1)
+      if [ ! -e $E/$id/squashfs-root/AppRun ]; then # AppImage на DwarFS (uruntime): официальный dwarfsextract
+        local off=$($E/$id/app.AppImage --appimage-offset 2>/dev/null | tr -dc 0-9)
+        if [ -n "$off" ]; then
+          [ -x $E/.dwarfs ] || { u=$(pingvin-dl --gh mhx/dwarfs 'dwarfs-[0-9.]+-Linux-aarch64\.tar\.xz$') && fetch "$u" /tmp/dw.tar.xz && { command -v xz >/dev/null && tar -xJf /tmp/dw.tar.xz -C /tmp || tar -x -I pingvin-xz -f /tmp/dw.tar.xz -C /tmp; } && cp /tmp/dwarfs-*-Linux-aarch64/bin/dwarfsextract $E/.dwarfs && chmod +x $E/.dwarfs; rm -rf /tmp/dw.tar.xz /tmp/dwarfs-*-Linux-aarch64; }
+          rm -rf $E/$id/squashfs-root; mkdir -p $E/$id/squashfs-root
+          $E/.dwarfs -i $E/$id/app.AppImage -o $E/$id/squashfs-root -O $off 2>&1 | tail -2
+        fi
+      fi
+      [ -e $E/$id/squashfs-root/AppRun ] || { echo "AppImage не распаковался"; return 1; }
+      sed -i '/^SDL_AUDIODRIVER=/d' $E/$id/squashfs-root/.env 2>/dev/null  # в proot нет PulseAudio
+      fixdeps $E/$id/squashfs-root
+      rm -f $E/$id/app.AppImage
+      printf '#!/bin/bash\n[ -z "$DISPLAY" ] && exec pingvin-gui emu-%s "$@"\ncd %s/squashfs-root || exit 1\n[ -n "$PULSE_SERVER" ] || export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}\nexec env APPDIR=$PWD LIBGL_ALWAYS_SOFTWARE=1 QT_QPA_PLATFORM=xcb QT_XCB_GL_INTEGRATION=none QT_XCB_NO_MITSHM=1 ./AppRun "$@"\n' $id $E/$id > $B/emu-$id; chmod +x $B/emu-$id
+      local ic=$(ls $E/$id/squashfs-root/*.png 2>/dev/null | head -1)
+      shortcut $id "$name" emu-$id "$ext" "$ic";;
+  deb) echo "Ставлю из репозитория Debian: $src"; apt-get update -q || true; apt-get install -y --no-install-recommends $src || return 1
+      local d=$(dpkg -L $src 2>/dev/null | grep -m1 '/usr/share/applications/.*\.desktop$')
+      local ex=$(grep -m1 '^Exec=' "$d" 2>/dev/null | cut -d= -f2- | sed -E 's/ ?%[fFuU]//g'); [ -n "$ex" ] || ex=$src
+      printf '#!/bin/bash\n[ -z "$DISPLAY" ] && exec pingvin-gui emu-%s "$@"\nexec %s "$@"\n' $id "$ex" > $B/emu-$id; chmod +x $B/emu-$id
+      shortcut $id "$name" emu-$id "$ext" "$(grep -m1 '^Icon=' "$d" 2>/dev/null | cut -d= -f2-)";;
+  win) local u; u=$(url "$src") || return 1; local f=/tmp/emu-$id.${u##*.}; fetch "$u" $f || return 1
+      rm -rf $E/$id/app; 7z x -y -o$E/$id/app "$f" >/dev/null || return 1; rm -f "$f"
+      local exe=$(find $E/$id/app -iname '*.exe' -size +500k | grep -viE 'unins|setup|crash|update' | head -1); [ -n "$exe" ] || { echo "нет .exe"; return 1; }
+      printf '#!/bin/bash\nexec pingvin-wine "%s" "$@"\n' "$exe" > $B/emu-$id; chmod +x $B/emu-$id
+      shortcut $id "$name" emu-$id "$ext" wine;;
+  esac; }
+remove() { rm -rf $E/$1 $B/emu-$1 $A/emu-$1.desktop; sed -i "/	emu-$1\$/d" $MAP; pingvin-menu-refresh 2>/dev/null; echo "удалён $1"; }
+menu() { python3 - "$CAT" <<'P'
+import sys, os, subprocess, tkinter as tk
+rows = [l.split('|') for l in sys.argv[1].splitlines()]
+r = tk.Tk(className='pingvin-emu'); r.title('Эмуляторы консолей')
+tk.Label(r, text='Выберите эмулятор и нажмите «Установить» (скачивается из интернета с официального сайта)', wraplength=600).pack(fill='x')
+lb = tk.Listbox(r, font=('DejaVu Sans', 12), height=18)
+for i in rows: lb.insert('end', ('✔ ' if os.path.exists('/opt/emu/%s/.ok' % i[0]) else '   ') + i[1])
+lb.pack(fill='both', expand=True)
+def act(a):
+    s = lb.curselection()
+    if not s: return
+    i = rows[s[0]][0]
+    if a == 'run':
+        if os.path.exists('/opt/emu/%s/.ok' % i): subprocess.Popen(['emu-' + i], start_new_session=True)
+        else: log.insert('end', 'Сначала установите %s\n' % i)
+        return
+    log.delete('1.0', 'end'); log.insert('end', 'Установка %s…\n' % i)
+    p = subprocess.Popen(['pingvin-emu', 'install', i], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    def pump():
+        import select
+        while select.select([p.stdout], [], [], 0)[0]:
+            l = p.stdout.readline()
+            if not l: break
+            log.insert('end', l); log.see('end')
+        if p.poll() is None: r.after(300, pump)
+        else:
+            for l in p.stdout: log.insert('end', l)
+            log.insert('end', '\nГотово ✔\n' if p.returncode == 0 else '\nОшибка ✖ (код %s)\n' % p.returncode); log.see('end')
+            ok = os.path.exists('/opt/emu/%s/.ok' % i); lb.delete(s[0]); lb.insert(s[0], ('✔ ' if ok else '   ') + rows[s[0]][1])
+    pump()
+f = tk.Frame(r); f.pack(fill='x')
+tk.Button(f, text='Установить', command=lambda: act('install')).pack(side='left', expand=True, fill='x')
+tk.Button(f, text='Запустить', command=lambda: act('run')).pack(side='left', expand=True, fill='x')
+tk.Button(f, text='Закрыть', command=r.destroy).pack(side='left', expand=True, fill='x')
+log = tk.Text(r, height=8, font=('DejaVu Sans Mono', 9)); log.pack(fill='both')
+r.mainloop()
+P
+}
+case "$1" in
+  list) listing;;
+  install) shift; rc=0; for i in "$@"; do install "$i" || { echo "✖ не установлен: $i"; rc=1; }; done; exit $rc;;
+  remove) remove "$2";;
+  run) id=$2; shift 2; exec emu-$id "$@";;
+  --menu) [ -z "$DISPLAY" ] && exec pingvin-gui pingvin-emu --menu; menu;;
+  "") listing; echo; read -p "Номер или id для установки (Enter — выход): " a; [ -z "$a" ] && exit 0
+      case "$a" in *[!0-9]*) ;; *) a=$(echo "$CAT" | sed -n "${a}p" | cut -d'|' -f1);; esac; install "$a";;
+  *) echo "pingvin-emu [list|install ID…|remove ID|run ID ROM|--menu]";;
+esac

@@ -1,0 +1,29 @@
+#!/bin/bash
+# pingvin-pickexe DIR [NAME] — найти главный исполняемый файл распакованной программы
+# 1) Exec из .desktop пакета; 2) Electron: бинарь рядом с resources/app.asar; 3) самый крупный ELF.
+D="${1%/}"; N="$(echo "$2" | tr A-Z a-z)"
+bad() { case "$(basename "$1")" in chrome-sandbox|chrome_crashpad_handler|crashpad_handler|*.so|*.so.*|*.pak|*.bin|*.dat|*.json|update|uninstall*|*helper*) return 0;; esac; return 1; }
+ok() { [ -f "$1" ] && [ -x "$1" ] && ! bad "$1"; }
+inroot() { # путь из пакета -> путь в D (с учётом абсолютных симлинков внутри пакета)
+  local p="$1" i; for i in 1 2 3 4 5 6; do
+    case "$p" in "$D"/*) ;; /*) p="$D$p";; esac
+    if [ -L "$p" ]; then local t; t=$(readlink "$p"); case "$t" in /*) p="$t";; *) p="$(dirname "$p")/$t";; esac; else break; fi
+  done; echo "$p"; }
+for df in "$D"/usr/share/applications/*.desktop "$D"/*.desktop; do [ -f "$df" ] || continue
+  e=$(grep -m1 '^Exec=' "$df" | cut -d= -f2-); e=${e#env }; while [[ "$e" == *=*\ * && "$e" != /* && "$e" != \"* ]]; do e=${e#* }; done
+  t=$(echo "$e" | sed -E 's/^"([^"]*)".*/\1/; t; s/ .*//')
+  case "$t" in /*) c=$(inroot "$t");; *) c=$(inroot "/usr/bin/$t");; esac
+  ok "$c" && { readlink -f "$c" 2>/dev/null || echo "$c"; exit 0; }
+done
+best=""; bs=0
+for a in $(find "$D" -maxdepth 6 -path '*/resources/app.asar' 2>/dev/null | tr '\n' '\001' | tr ' ' '\002' | tr '\001' ' '); do
+  a=$(echo "$a" | tr '\002' ' '); dd=$(dirname "$(dirname "$a")")
+  for f in "$dd"/*; do ok "$f" || continue; [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = 7f454c46 ] || continue
+    s=$(stat -c %s "$f"); [ -n "$N" ] && [[ "$(basename "$f" | tr A-Z a-z)" == "$N"* ]] && s=$((s*10)); [ $s -gt $bs ] && { bs=$s; best="$f"; }; done
+done
+[ -n "$best" ] && { echo "$best"; exit 0; }
+while IFS= read -r f; do ok "$f" || continue; [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = 7f454c46 ] || continue
+  s=$(stat -c %s "$f"); [ -n "$N" ] && [[ "$(basename "$f" | tr A-Z a-z)" == "$N"* ]] && s=$((s*10)); [ $s -gt $bs ] && { bs=$s; best="$f"; }
+done < <(find "$D" -maxdepth 5 -type f -perm -u+x 2>/dev/null)
+[ -n "$best" ] && { echo "$best"; exit 0; }
+exit 1

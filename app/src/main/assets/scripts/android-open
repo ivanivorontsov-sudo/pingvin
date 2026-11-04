@@ -1,0 +1,4 @@
+#!/bin/sh
+q=/root/.pingvin/queue; mkdir -p $q; id=$(date +%s%N)
+t="$1"; [ -e "$t" ] && t=$(readlink -f "$t")
+printf 'open\n%s\n' "$t" > $q/$id.tmp && mv $q/$id.tmp $q/$id.req

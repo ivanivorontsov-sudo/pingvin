@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# Рабочий стол «Пингвина»: обои + значки установленных программ (обновляются сами).
+import os, glob, shutil, subprocess, tkinter as tk
+HOME = os.path.expanduser('~'); ST = HOME + '/.pingvin'; os.makedirs(ST, exist_ok=True)
+WP = [ST + '/wallpaper.png', '/opt/pingvin/wallpaper.png']
+BASE = ST + '/desk-base'
+SYS = '/usr/share/applications'
+LOCAL = [HOME + '/.local/share/applications', HOME + '/Desktop', SYS + '/pingvin']
+BUILTIN = [('Firefox (Linux)', 'pingvin-browser', 'firefox-esr'), ('K-Meleon (Windows)', 'pingvin-winbrowser', 'wine'),
+           ('Эмуляторы', 'pingvin-emu --menu', 'applications-games'), ('Терминал', 'xterm', 'utilities-terminal')]
+if not os.path.exists(BASE):  # то, что было в системе до установки программ, на стол не выносим
+    with open(BASE, 'w') as f: f.write('\n'.join(sorted(glob.glob(SYS + '/*.desktop'))))
+base = set(open(BASE).read().split())
+def parse(p):
+    d = {}
+    try:
+        sec = None
+        for l in open(p, errors='ignore'):
+            l = l.strip()
+            if l.startswith('['): sec = l; continue
+            if sec == '[Desktop Entry]' and '=' in l:
+                k, v = l.split('=', 1); d.setdefault(k, v)
+    except Exception: return None
+    if d.get('Type') != 'Application' or d.get('NoDisplay', '').lower() == 'true' or d.get('Hidden', '').lower() == 'true': return None
+    return d
+def entries():
+    fs = []
+    for d in LOCAL: fs += glob.glob(d + '/**/*.desktop', recursive=True)
+    fs += [f for f in glob.glob(SYS + '/*.desktop') if f not in base]
+    out, seen = [], set()
+    for f in sorted(fs):
+        d = parse(f)
+        if not d: continue
+        n = d.get('Name[ru]') or d.get('Name') or os.path.basename(f)
+        if n in seen: continue
+        seen.add(n); out.append((n, ['pingvin-launch', f], d.get('Icon', '')))
+    return out
+def find_icon(name):
+    if not name: return None
+    if name.startswith('/') and name.lower().endswith(('.png', '.gif')) and os.path.exists(name): return name
+    pats = []
+    for root in (HOME + '/.local/share/icons', '/usr/share/icons'):
+        for sz in ('48x48', '64x64', '32x32', '128x128', '256x256', '*'):
+            pats.append(f'{root}/*/{sz}/apps/{name}.png')
+    pats += [f'/usr/share/pixmaps/{name}.png', f'/usr/share/pixmaps/{name}.gif', f'{HOME}/.local/share/icons/{name}.png']
+    for p in pats:
+        g = glob.glob(p)
+        if g: return g[0]
+    return None
+class Desk:
+    def __init__(s):
+        s.r = tk.Tk(className='pingvin-desktop'); s.r.title('Рабочий стол')
+        try: s.r.attributes('-type', 'desktop')
+        except Exception: pass
+        s.c = tk.Canvas(s.r, highlightthickness=0, bg='#1b2440'); s.c.pack(fill='both', expand=True)
+        s.sig = None; s.size = None; s.imgs = []; s.bg = None
+        s.r.after(50, s.tick)
+    def geom(s):
+        w, h = s.r.winfo_screenwidth(), s.r.winfo_screenheight()
+        s.r.geometry(f'{w}x{h}+0+0'); return w, h
+    def wallpaper(s, w, h):
+        wp = WP + (['/opt/pingvin/wallpaper-portrait.png'] if h > w else [])
+        if h > w: wp = [ST + '/wallpaper.png', '/opt/pingvin/wallpaper-portrait.png', '/opt/pingvin/wallpaper.png']
+        src = next((p for p in wp if os.path.exists(p)), None)
+        if not src: return
+        out = f'/tmp/pingvin-wp-{w}x{h}.png'
+        if not os.path.exists(out):  # масштаб «заполнить» через python3-pil, если есть
+            try:
+                from PIL import Image
+                im = Image.open(src).convert('RGB'); k = max(w / im.width, h / im.height)
+                im = im.resize((int(im.width * k) + 1, int(im.height * k) + 1))
+                l, t = (im.width - w) // 2, (im.height - h) // 2
+                im.crop((l, t, l + w, t + h)).save(out)
+            except Exception: out = src
+        try:
+            s.bg = tk.PhotoImage(file=out); s.c.create_image(w // 2, h // 2, image=s.bg)
+        except Exception: pass
+    def draw(s, items):
+        w, h = s.geom(); s.c.delete('all'); s.imgs = []; s.wallpaper(w, h)
+        cw, ch = 110, 104; cols = max(1, (h - 20) // ch)
+        for i, (name, cmd, icon) in enumerate(items):
+            x = 20 + (i // cols) * cw + cw // 2; y = 16 + (i % cols) * ch
+            tag = f'i{i}'; p = find_icon(icon); im = None
+            if p:
+                try:
+                    im = tk.PhotoImage(file=p); f = max(1, max(im.width(), im.height()) // 56); im = im.subsample(f, f)
+                except Exception: im = None
+            if im: s.imgs.append(im); s.c.create_image(x, y + 28, image=im, tags=tag)
+            else:
+                s.c.create_rectangle(x - 26, y + 2, x + 26, y + 54, fill='#3b6fd8', outline='white', width=2, tags=tag)
+                s.c.create_text(x, y + 28, text=name[:1].upper(), fill='white', font=('DejaVu Sans', 22, 'bold'), tags=tag)
+            short = name if len(name) <= 28 else name[:26] + '…'
+            s.c.create_text(x + 1, y + 76, text=short, width=cw - 6, fill='black', font=('DejaVu Sans', 9), tags=tag)
+            s.c.create_text(x, y + 75, text=short, width=cw - 6, fill='white', font=('DejaVu Sans', 9), tags=tag)
+            s.c.tag_bind(tag, '<ButtonRelease-1>', lambda e, c=cmd: s.run(c))
+    def run(s, cmd):
+        if isinstance(cmd, str): cmd = ['bash', '-c', cmd]
+        subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL)
+    def tick(s):
+        items = [(n, c, i) for n, c, i in BUILTIN if shutil.which(c.split()[0])] + entries()
+        sig = (repr(items), s.r.winfo_screenwidth(), s.r.winfo_screenheight())
+        if sig != s.sig: s.sig = sig; s.draw(items)
+        s.r.after(3000, s.tick)
+Desk().r.mainloop()

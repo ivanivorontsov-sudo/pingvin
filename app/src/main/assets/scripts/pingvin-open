@@ -1,0 +1,44 @@
+#!/bin/bash
+# pingvin-open FILE — открыть скачанный файл: .exe/.msi → Wine, .deb → установка, .AppImage → запуск.
+f=$(readlink -f "$1"); [ -f "$f" ] || { echo "нет файла $1"; exit 1; }
+[ -z "$DISPLAY" ] && exec pingvin-gui pingvin-open "$@"
+term() { if command -v xterm >/dev/null; then exec xterm -T "Пингвин: $(basename "$f")" -e bash -c "$1; echo; echo 'Готово. Enter — закрыть'; read x"; else bash -c "$1" 2>&1 | python3 -c 'import sys,tkinter as t;d=sys.stdin.read()[-4000:];r=t.Tk();r.title("Пингвин");x=t.Text(r,width=80,height=20);x.insert("1.0",d or "Готово");x.pack(fill="both",expand=1);t.Button(r,text="Закрыть",command=r.destroy).pack();r.mainloop()' 2>/dev/null; fi; }
+# Установщики Mozilla (Firefox/Thunderbird) на ARM под Wine отказываются ставиться («нужен SSE2»,
+# x86-флаги CPU не видны NSIS) — ставим распаковкой (тот же результат, что у установщика) + ярлык.
+mozilla_install() {
+  command -v 7z >/dev/null || { echo "Ставлю 7zip для распаковки…"; apt-get install -y 7zip >/dev/null 2>&1 || apt-get install -y p7zip-full >/dev/null 2>&1; }
+  command -v 7z >/dev/null || return 1
+  local exe; exe=$(7z l -ba "$f" 2>/dev/null | grep -oE 'core/[a-z]+\.exe$' | grep -vE 'updater|uninstall|helper|maintenance|crashreporter|default-browser|minidump|pingsender|private_browsing|plugin-container|nmhproxy' | head -1)
+  [ -n "$exe" ] || return 1
+  local app; app=$(basename "$exe" .exe); local App="$(echo "${app:0:1}" | tr a-z A-Z)${app:1}"
+  local dst="${WINEPREFIX:-/root/.wine}/drive_c/Program Files/Mozilla $App"
+  echo "Установщик Mozilla $App: устанавливаю распаковкой в C:\\Program Files\\Mozilla $App …"
+  pingvin-wine --prepare || return 1
+  rm -rf /tmp/pmoz; mkdir -p /tmp/pmoz "$dst"
+  7z x -y -o/tmp/pmoz "$f" 'core/*' >/dev/null || return 1
+  cp -a /tmp/pmoz/core/. "$dst/" && rm -rf /tmp/pmoz
+  mkdir -p /root/.local/share/applications/wine/Programs
+  printf '[Desktop Entry]\nType=Application\nName=Mozilla %s (Windows)\nExec=pingvin-wine "%s"\nIcon=%s\n' "$App" "$dst/$app.exe" "$app" > "/root/.local/share/applications/wine/Programs/Mozilla $App.desktop"
+  pingvin-menu-refresh
+  echo "✔ Установлено. Ярлык «Mozilla $App (Windows)» добавлен в меню. Запускаю…"
+  exec pingvin-wine "$dst/$app.exe"
+}
+# ROM-файлы → установленный эмулятор (pingvin-emu)
+ext=$(echo "${f##*.}" | tr A-Z a-z)
+em=$(awk -F'\t' -v e="$ext" '$1==e{print $2}' /root/.pingvin/emu-assoc 2>/dev/null | tail -1)
+[ -n "$em" ] && command -v "$em" >/dev/null && exec "$em" "$f"
+case "$ext" in gba|gb|gbc|sfc|smc|md|gen|smd|sms|gg|nes|n64|z64|v64|nds|cue|chd|pbp|cso|cdi|gdi|32x|a26|rvz|wbfs)
+  python3 -c 'import sys,tkinter as t,tkinter.messagebox as m;r=t.Tk();r.withdraw();m.showinfo("Нужен эмулятор","Для ."+sys.argv[1]+" не установлен эмулятор.\nСейчас откроется каталог эмуляторов.")' "$ext" 2>/dev/null || notify-send "Нужен эмулятор для .$ext" 2>/dev/null
+  exec pingvin-emu --menu;; esac
+case "$(echo "$f" | tr A-Z a-z)" in
+  *.com|*.bat) exec pingvin-wine "$f";;
+  *.iso|*.cue|*.ima) exec pingvin-dos "$f";;
+  *.exe) mozilla_install || exec pingvin-wine "$f";;
+  *.msi|*.bat|*.com) exec pingvin-wine "$f";;
+  *.deb) term "apt-get install -y '$f' || dpkg -i '$f'; pingvin-menu-refresh";;
+  *.appimage) chmod +x "$f"; n=$(basename "$f" .AppImage); mkdir -p /root/.local/share/applications
+     printf '[Desktop Entry]\nType=Application\nName=%s\nExec=env APPIMAGE_EXTRACT_AND_RUN=1 "%s"\nIcon=application-x-executable\n' "$n" "$f" > "/root/.local/share/applications/appimage-$n.desktop"
+     APPIMAGE_EXTRACT_AND_RUN=1 exec "$f";;
+  *.tar.gz|*.tgz|*.zip|*.tar.xz) term "cd '$(dirname "$f")' && (tar -xf '$f' 2>/dev/null || python3 -m zipfile -e '$f' .) && ls";;
+  *) command -v xdg-open >/dev/null && exec xdg-open "$f"; echo "Не знаю, чем открыть $f";;
+esac

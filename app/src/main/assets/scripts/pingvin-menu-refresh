@@ -1,0 +1,3 @@
+#!/bin/bash
+# сигнал приложению «Пингвин» обновить список программ
+mkdir -p /root/.pingvin; date +%s%N > /root/.pingvin/menu-changed
