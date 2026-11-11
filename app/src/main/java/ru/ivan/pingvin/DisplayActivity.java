@@ -76,12 +76,32 @@ public class DisplayActivity extends Activity implements RfbClient.Listener {
         int code = p.waitFor();
         if (isFinishing()) return;
         say("Программа завершилась (код " + code + ")");
-        if (code == 0) runOnUiThread(() -> { if (!isFinishing()) { Toast.makeText(this, "Программа завершилась", Toast.LENGTH_SHORT).show(); finish(); } });
-        else runOnUiThread(() -> { if (isFinishing()) return;
+        appendAppLogs();
+        if (code != 0) runOnUiThread(() -> { if (isFinishing()) return;
             if (log.getParent() != null) ((android.view.ViewGroup) log.getParent()).removeView(log);
             new android.app.AlertDialog.Builder(this).setTitle("Ошибка (код " + code + ") — лог").setView(wrap(log))
                 .setPositiveButton("Закрыть дисплей", (d, w) -> finish()).setNeutralButton("Копировать", (d, w) -> LogShare.copy(this, log.getText()))
                 .setNegativeButton("Поделиться", (d, w) -> LogShare.share(this, log.getText())).setCancelable(false).show(); });
+        else runOnUiThread(() -> { if (!isFinishing()) Toast.makeText(this, "Программа завершилась", Toast.LENGTH_SHORT).show(); });
+    }
+
+    /** Хвосты логов запуска из Linux — чтобы сбой Тихо/Electron/Wine был виден, а не «тихий» выход. */
+    void appendAppLogs() {
+        for (String rel : new String[]{"root/.pingvin/run.log", "root/.pingvin/firefox.log", "root/.pingvin/wine-run.log"}) {
+            File f = new File(lx.rootfs, rel);
+            if (!f.isFile() || f.length() == 0) continue;
+            say("\n=== " + rel + " ===");
+            try {
+                java.util.ArrayDeque<String> q = new java.util.ArrayDeque<>();
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+                    String line; while ((line = r.readLine()) != null) {
+                        if (q.size() >= 80) q.removeFirst();
+                        q.addLast(line);
+                    }
+                }
+                for (String line : q) say(line);
+            } catch (IOException e) { say("(не прочитал " + rel + ": " + e + ")"); }
+        }
     }
 
     void btn(LinearLayout bar, String t, android.view.View.OnClickListener c) {

@@ -84,7 +84,7 @@ public class Linux {
         } catch (Exception e) { android.util.Log.e("pingvin", "gui debs", e); return false; }
     }
 
-    public static final String EXTRAS_VER = "1.13-hangover-11.16";
+    public static final String EXTRAS_VER = "1.15";
     static final Object EXTRAS_LOCK = new Object();
     /** Однократно: обновляет скрипты после обновления APK, распаковывает встроенный Wine (Hangover, arm64) и Firefox ESR. */
     static final String[] WINE_KEYS = {"usr/lib/wine/aarch64-unix/ntdll.so", "usr/lib/wine/aarch64-unix/wine", "usr/lib/wine/aarch64-windows/kernel32.dll",

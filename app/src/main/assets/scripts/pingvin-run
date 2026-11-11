@@ -20,18 +20,40 @@ case "$(basename "$real")" in chrome-sandbox|chrome_crashpad_handler|crashpad_ha
 esac
 # Electron/Chromium: под proot нет песочницы и /dev/shm мал
 ed=$(dirname "$real")
-if [ -e "$ed/chrome-sandbox" ] || [ -e "$ed/resources/app.asar" ] || [ -e "$ed/v8_context_snapshot.bin" ] || [ -e "$ed/chrome_crashpad_handler" ]; then
-  export ELECTRON_DISABLE_SANDBOX=1 ELECTRON_DISABLE_GPU=1
-  set -- --no-sandbox --disable-gpu --disable-dev-shm-usage --disable-gpu-sandbox "$@"
+if [ -e "$ed/chrome-sandbox" ] || [ -e "$ed/resources/app.asar" ] || [ -e "$ed/v8_context_snapshot.bin" ] || [ -e "$ed/chrome_crashpad_handler" ] \
+   || [ -e "$ed/chrome_100_percent.pak" ] || { [ -n "$APPDIR" ] && [ -e "$APPDIR/resources/app.asar" ]; }; then
+  export ELECTRON_DISABLE_SANDBOX=1 ELECTRON_DISABLE_GPU=1 LIBGL_ALWAYS_SOFTWARE=1
+  export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
+  set -- --no-sandbox --disable-setuid-sandbox --disable-gpu --disable-gpu-sandbox \
+         --disable-dev-shm-usage --no-zygote --in-process-gpu \
+         --disable-seccomp-filter-sandbox --disable-namespace-sandbox --ozone-platform=x11 "$@"
 fi
+logged_run() {
+  mkdir -p /root/.pingvin
+  LOG=/root/.pingvin/run.log
+  echo "=== $(date '+%F %T') $* ===" >> "$LOG"
+  start=$SECONDS
+  "$@" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+  dur=$((SECONDS-start))
+  echo "=== код $rc за ${dur} с ===" >> "$LOG"
+  if [ "$dur" -le 8 ] && ! grep -q 'Firefox уже открыт' "$LOG" 2>/dev/null; then
+    echo "✖ Программа завершилась сразу (код $rc, ${dur} с). Это похоже на сбой запуска, а не на обычный выход."
+    echo "Хвост лога ($LOG):"
+    tail -n 50 "$LOG"
+    echo "Полный лог: $LOG — кнопка «Лог» / «Поделиться» в Пингвине."
+    [ "$rc" -eq 0 ] && rc=1
+  fi
+  exit $rc
+}
 magic=$(od -An -tx1 -N4 "$real" 2>/dev/null | tr -d ' \n')
 if [ "$magic" = "7f454c46" ]; then
   m=$(od -An -tu2 -j18 -N2 "$real" | tr -d ' ')
-  export BOX64_LD_LIBRARY_PATH="$(dirname "$real")${BOX64_LD_LIBRARY_PATH:+:$BOX64_LD_LIBRARY_PATH}"
+  export BOX64_LD_LIBRARY_PATH="$(dirname "$real"):/usr/lib/box64-x86_64-linux-gnu${BOX64_LD_LIBRARY_PATH:+:$BOX64_LD_LIBRARY_PATH}"
   host=$(uname -m)
   case "$m" in
-    62) [ "$host" = x86_64 ] || { command -v box64 >/dev/null || pingvin-install box64; exec box64 "$real" "$@"; } ;;
-    3)  case "$host" in x86_64|i?86) ;; *) command -v box64 >/dev/null || pingvin-install box64; exec box64 "$real" "$@";; esac ;;
+    62) [ "$host" = x86_64 ] || { command -v box64 >/dev/null || pingvin-install box64; logged_run box64 "$real" "$@"; } ;;
+    3)  case "$host" in x86_64|i?86) ;; *) command -v box64 >/dev/null || pingvin-install box64; logged_run box64 "$real" "$@";; esac ;;
   esac
 fi
-exec "$f" "$@"
+logged_run "$f" "$@"

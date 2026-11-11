@@ -6,6 +6,31 @@
 case "$1" in *.[eE][xX][eE]|*.[cC][oO][mM]) [ -f "$1" ] && pingvin-dos --is-dos "$1" && exec pingvin-dos "$1";;
   *.[bB][aA][tT]) [ -f "$1" ] && { pe=0; for x in "$(dirname "$1")"/*.[eE][xX][eE]; do [ -f "$x" ] && ! pingvin-dos --is-dos "$x" && pe=1 && break; done; [ $pe = 0 ] && exec pingvin-dos "$1"; };; esac
 case "$1" in --setup|--reset|--prepare|--mono) ;; *) [ -z "$DISPLAY" ] && exec pingvin-gui pingvin-wine "$@";; esac
+# Тихо/Firefox x64 через Wine на телефоне сразу закрываются — родной Firefox ESR.
+if [ -f "$1" ]; then
+  _bn=$(basename "$1" | tr A-Z a-z)
+  case "$_bn" in firefox.exe|private_browsing.exe|*tiho*.exe|*tiho*.msi)
+    _pe=$(python3 -c 'import struct,sys
+p=sys.argv[1]
+try:
+  f=open(p,"rb")
+  if f.read(2)!=b"MZ": raise SystemExit
+  f.seek(0x3c); pe=struct.unpack("<I", f.read(4))[0]; f.seek(pe)
+  if f.read(4)!=b"PE\0\0": raise SystemExit
+  mach=struct.unpack("<H", f.read(2))[0]
+  print({0x8664:"amd64",0xAA64:"arm64",0x14c:"i386"}.get(mach,hex(mach)))
+except Exception:
+  pass' "$1" || true)
+    case "$_bn" in *arm64*|*aarch64*) _pe=arm64;; esac
+    if [ "$_pe" != arm64 ]; then
+      echo "[wine] Это Windows-сборка Тихо/Firefox (x86_64). Под Wine/Hangover браузер на телефоне почти сразу закрывается."
+      echo "[wine] Запускаю рабочий «Тихо» на встроенном Firefox ESR (arm64)."
+      [ -x /usr/local/bin/tiho ] || PINGVIN_TITLE=Тихо pingvin-tiho --install /opt/pingvin tiho || exit 1
+      exec pingvin-tiho --run tiho
+    fi
+    ;;
+  esac
+fi
 log() { echo "[wine] $*"; }
 PVER=hangover-11.16
 W=/usr/lib/wine
@@ -169,8 +194,9 @@ case "$(echo "$1" | tr A-Z a-z)" in
   *.exe|*.bat|*.com) f=$(readlink -f "$1"); shift; cd "$(dirname "$f")"
     # Electron/Chromium (resources/app.asar): под Wine+эмуляцией GPU-процесс и песочница падают → окно не реагирует,
     # renderer перезапускается и снова показывает стартовую страницу. Свои флаги: /root/.pingvin/electron-flags
-    if [ -e resources/app.asar ] || [ -d resources/app ] || { [ -e libEGL.dll ] && ls *.pak >/dev/null 2>&1; }; then
-      EF=$(cat /root/.pingvin/electron-flags 2>/dev/null || echo "--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --disable-hang-monitor --disable-features=CalculateNativeWinOcclusion,RendererCodeIntegrity,WinRetrieveSuggestionsOnlyOnDemand --disable-renderer-backgrounding --disable-background-timer-throttling")
+    if [ -e resources/app.asar ] || [ -d resources/app ] || { [ -e libEGL.dll ] && ls *.pak >/dev/null 2>&1; } \
+       || { case "$(basename "$f" | tr A-Z a-z)" in *electron*|*tiho*|chrome.exe) true;; *) false;; esac; }; then
+      EF=$(cat /root/.pingvin/electron-flags 2>/dev/null || echo "--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --disable-hang-monitor --no-zygote --disable-dev-shm-usage --disable-features=CalculateNativeWinOcclusion,RendererCodeIntegrity,WinRetrieveSuggestionsOnlyOnDemand --disable-renderer-backgrounding --disable-background-timer-throttling")
       log "Electron-приложение: запускаю с $EF"
       set -- "$f" $EF "$@"
     else set -- "$f" "$@"; fi;;
@@ -200,5 +226,9 @@ WINEDEBUG=${WINEDEBUG:-err+all} wine "$@" > >(tee "$RLOG") 2>&1; rc=$?
 pingvin-menu-refresh; wineserver -w 2>/dev/null
 [ -n "$inst" ] && postinstall "$inst"
 pingvin-menu-refresh
+if [ $rc = 0 ] && grep -qE 'GPU process isn.t usable|Zygote command|STATUS_ACCESS_VIOLATION|ERROR:sandbox|seccomp sandbox|Trace/breakpoint' "$RLOG" 2>/dev/null; then
+  rc=1
+  log "✖ В логе признаки сбоя, хотя код выхода был 0."
+fi
 if [ $rc != 0 ]; then log "✖ Программа завершилась с кодом $rc. Хвост лога ($RLOG):"; grep -v '^\[BOX64\]' "$RLOG" | tail -30; diagnose; fi
 exit $rc

@@ -17,6 +17,49 @@ isff() { local a; a=$(find "$1" -maxdepth 3 -name application.ini 2>/dev/null | 
 ffinst() { local n="$2" t=""; find "$1" -maxdepth 3 -iname 'README-TIHO*' | grep -q . && { n=${3:-tiho}; t="Тихо"; }
   echo "Это сборка на Firefox ESR (x86_64). Ставлю её с родным arm64 Firefox ESR Пингвина — быстрее и без box64/Wine."
   PINGVIN_TITLE="${t:-$n}" pingvin-tiho --install "$1" "$n"; local r=$?; rm -rf "$1"; return $r; }
+istiho_name() { echo "$1" | tr A-Z a-z | grep -qE 'tiho|тихо'; }
+is_electron_dir() { find "$1" -maxdepth 5 \( -name app.asar -o -name chrome-sandbox -o -name v8_context_snapshot.bin \) 2>/dev/null | grep -q .; }
+is_tiho_dir() {
+  [ -d "$1" ] || return 1
+  find "$1" -maxdepth 4 \( -iname 'README-TIHO*' -o -name desktop-update-key.json \) 2>/dev/null | grep -q . && return 0
+  grep -qiE 'Name=Тихо|tiho-desktop|org.ivanivorontsov.tiho' "$1"/usr/share/applications/*.desktop "$1"/*.desktop 2>/dev/null && return 0
+  istiho_name "$(basename "$1")" && is_electron_dir "$1" && return 0
+  return 1
+}
+elf_machine() {
+  [ -f "$1" ] || return 1
+  local mag m
+  mag=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+  [ "$mag" = 7f454c46 ] || return 1
+  m=$(od -An -tu2 -j18 -N2 "$1" | tr -d ' ')
+  case "$m" in 62) echo x86_64;; 183) echo aarch64;; 3) echo i386;; *) echo "$m";; esac
+}
+pe_machine() {
+  python3 -c 'import struct,sys
+p=sys.argv[1]
+try:
+  f=open(p,"rb")
+  if f.read(2)!=b"MZ": raise SystemExit
+  f.seek(0x3c)
+  pe=struct.unpack("<I", f.read(4))[0]
+  f.seek(pe)
+  if f.read(4)!=b"PE\0\0": raise SystemExit
+  mach=struct.unpack("<H", f.read(2))[0]
+  print({0x8664:"amd64",0xAA64:"arm64",0x14c:"i386"}.get(mach,hex(mach)))
+except Exception:
+  pass' "$1"
+}
+is_firefox_windows_exe() {
+  case "$(basename "$1" | tr A-Z a-z)" in firefox.exe|private_browsing.exe) return 0;; esac
+  return 1
+}
+tiho_compat_install() {
+  echo "На телефоне (обычно ARM) сборка Тихо для ПК x86_64/Windows не запускается как есть:"
+  echo "x86_64 Electron/Firefox через box64 или Wine сразу закрывается (песочница Chromium/Gecko, GPU, эмуляция)."
+  echo "Ставлю рабочий «Тихо» на встроенном родном Firefox ESR (arm64) с политиками приватности Тихо."
+  local s="$1"; [ -d "$s" ] || s=/opt/pingvin
+  PINGVIN_TITLE="${PINGVIN_TITLE:-Тихо}" pingvin-tiho --install "$s" tiho
+}
 # Распакованный каталог (zip/tar): вложенный архив/установщик -> рекурсивно; Firefox-сборка; Windows-портативная; Linux
 postx() { local D="$1" n="$2" inner cnt
   cnt=$(find "$D" -mindepth 1 -maxdepth 2 -not -name '*.txt' -not -name '*.md' -not -type d | wc -l)
@@ -25,6 +68,13 @@ postx() { local D="$1" n="$2" inner cnt
     echo "Внутри архива: $(basename "$inner") — устанавливаю его"
     nf="/root/.pingvin/inner-$(basename "$inner")"; mv -f "$inner" "$nf"; rm -rf "$D"; PINGVIN_RM="$nf" exec "$0" "$nf" "$3"; fi
   if isff "$D"; then ffinst "$D" "$n" "$3"; echo PINGVIN_OK; exit 0; fi
+  if is_tiho_dir "$D" && is_electron_dir "$D"; then
+    local ex em; ex=$(pingvin-pickexe "$D" "${n:-tiho}" || true)
+    em=$(elf_machine "$ex" 2>/dev/null || true)
+    if [ -z "$em" ] || [ "$em" != "$(uname -m)" ]; then
+      tiho_compat_install "$D"; rm -rf "$D"; echo PINGVIN_OK; exit 0; fi
+  elif is_tiho_dir "$D"; then
+    tiho_compat_install "$D"; rm -rf "$D"; echo PINGVIN_OK; exit 0; fi
   local exe; exe=$(find "$D" -maxdepth 4 -type f -iname '*.exe' 2>/dev/null | grep -viE 'unins|setup|install|update|crash|helper|maintenance|vc_?redist|dxsetup' | while read -r f; do echo "$(stat -c %s "$f") $f"; done | sort -rn | head -1 | cut -d' ' -f2-)
   if [ -n "$exe" ] && ! pingvin-pickexe "$D" "$n" >/dev/null 2>&1; then
     rm -rf "/root/WinApps/$n"; mkdir -p "/root/WinApps"; mv "$D" "/root/WinApps/$n"; f="/root/WinApps/$n/${exe#$D/}"
@@ -47,7 +97,11 @@ if [ -f "$src" ]; then
   *.deb)
     aptup; pkg=$(dpkg-deb -f "$src" Package); arch=$(dpkg-deb -f "$src" Architecture)
     me=$(dpkg --print-architecture)
-    if [ "$arch" != all ] && [ "$arch" != "$me" ]; then
+    if [ "$arch" != all ] && [ "$arch" != "$me" ] && { istiho_name "$pkg" || istiho_name "$(basename "$src")" || [ "$pkg" = tiho-desktop ]; }; then
+      echo "Пакет Тихо архитектуры $arch (здесь $(uname -m)) — не запускаю через box64."
+      tmp=$(mktemp -d /root/.pingvin/unpack.XXXXXX); dpkg-deb -x "$src" "$tmp"
+      tiho_compat_install "$tmp"; rm -rf "$tmp"; echo PINGVIN_OK; exit 0
+    elif [ "$arch" != all ] && [ "$arch" != "$me" ]; then
       echo "Other architecture $arch: unpacking to /opt/$pkg (runs via box64)"
       which box64 || pingvin-install box64
       mkdir -p "/opt/$pkg"; dpkg-deb -x "$src" "/opt/$pkg"
@@ -61,6 +115,11 @@ if [ -f "$src" ]; then
     fi ;;
   *.appimage)
     name=${2:-$(basename "$src" | sed -E 's/\.appimage$//I; s/(-|_)v?[0-9].*//' | tr 'A-Z ' 'a-z-')}
+    if istiho_name "$name" || istiho_name "$(basename "$src")"; then
+      am=$(elf_machine "$src" || true)
+      if [ -n "$am" ] && [ "$am" != "$(uname -m)" ]; then
+        echo "AppImage Тихо ($am) на $(uname -m) — ставлю родной Тихо (Firefox ESR)."
+        tiho_compat_install /opt/pingvin; echo PINGVIN_OK; exit 0; fi; fi
     which unsquashfs || { aptup; apt-get install -y squashfs-tools; }
     shoff=$(od -An -tu8 -j40 -N8 "$src" | tr -d ' '); shes=$(od -An -tu2 -j58 -N2 "$src" | tr -d ' '); shn=$(od -An -tu2 -j60 -N2 "$src" | tr -d ' ')
     off=$((shoff + shes*shn))
@@ -78,6 +137,21 @@ if [ -f "$src" ]; then
   *.exe|*.com) [ -n "$DOSCHK" ] || { pingvin-dos --is-dos "$src" && { DOSCHK=1; d=/root/DOS/$(basename "$src" | sed -E 's/\.[^.]*$//' | tr 'A-Z ' 'a-z_'); mkdir -p "$d"; cp -f "$src" "$d/"; exec pingvin-dos "$d/$(basename "$src")"; }; } ;;&
   *.exe|*.msi)
     name=${2:-$(basename "$src" | sed -E 's/\.(exe|msi)$//I; s/(-|_| )v?[0-9].*//' | tr 'A-Z ' 'a-z-')}
+    if is_firefox_windows_exe "$src" || istiho_name "$(basename "$src")" || istiho_name "$name"; then
+      pem=$(pe_machine "$src" || true)
+      case "$(basename "$src" | tr A-Z a-z)" in *arm64*|*aarch64*) pem=arm64;; esac
+      if [ "$pem" = arm64 ]; then
+        echo "Windows ARM64-сборка Тихо — запущу через родной arm64 Wine."
+      else
+        d=$(dirname "$src")
+        if [ -f "$d/application.ini" ] && grep -qi '^Name=Firefox' "$d/application.ini"; then
+          tiho_compat_install "$d"
+        else
+          tiho_compat_install /opt/pingvin
+        fi
+        echo PINGVIN_OK; exit 0
+      fi
+    fi
     mkdir -p "/root/WinApps/$name"; cp -f "$src" "/root/WinApps/$name/"; f="/root/WinApps/$name/$(basename "$src")"
     w=/usr/local/bin/win-$name; printf '#!/bin/sh\nexec pingvin-wine "%s" "$@"\n' "$f" > "$w"; chmod +x "$w"
     reg "$name" "$w" 1

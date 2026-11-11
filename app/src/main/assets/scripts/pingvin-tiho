@@ -9,7 +9,9 @@
 FF=${PINGVIN_FF_DIR:-/usr/lib/firefox-esr}
 if [ "$1" = --install ]; then
   src="${2%/}"; name=${3:-tiho}; T=/opt/$name; title=${PINGVIN_TITLE:-Тихо}
+  [ -d "$src" ] || src=/opt/pingvin
   pol=$(find "$src" -maxdepth 4 -path '*/distribution/policies.json' 2>/dev/null | head -1)
+  [ -z "$pol" ] && [ -f /opt/pingvin/tiho-policies.json ] && pol=/opt/pingvin/tiho-policies.json
   mkdir -p /root/.pingvin/$name.d
   [ -n "$pol" ] && cp -f "$pol" /root/.pingvin/$name.d/policies.json
   rd=$(find "$src" -maxdepth 3 -iname 'README-TIHO*' 2>/dev/null | head -1); [ -n "$rd" ] && cp -f "$rd" /root/.pingvin/$name.d/README.txt
