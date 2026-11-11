@@ -7,9 +7,16 @@ case "$1" in *.[eE][xX][eE]|*.[cC][oO][mM]) [ -f "$1" ] && pingvin-dos --is-dos 
   *.[bB][aA][tT]) [ -f "$1" ] && { pe=0; for x in "$(dirname "$1")"/*.[eE][xX][eE]; do [ -f "$x" ] && ! pingvin-dos --is-dos "$x" && pe=1 && break; done; [ $pe = 0 ] && exec pingvin-dos "$1"; };; esac
 case "$1" in --setup|--reset|--prepare|--mono) ;; *) [ -z "$DISPLAY" ] && exec pingvin-gui pingvin-wine "$@";; esac
 # Тихо/Firefox x64 через Wine на телефоне сразу закрываются — родной Firefox ESR.
+# То же для старых ярлыков на crashreporter.exe/updater.exe и обёрток win-tiho-*.
 if [ -f "$1" ]; then
   _bn=$(basename "$1" | tr A-Z a-z)
-  case "$_bn" in firefox.exe|private_browsing.exe|*tiho*.exe|*tiho*.msi)
+  _remap=0
+  case "$_bn" in
+    firefox.exe|private_browsing.exe|*tiho*.exe|*tiho*.msi|crashreporter.exe|crashhelper.exe|updater.exe|pingsender.exe|plugin-container.exe|minidump-analyzer.exe)
+      _remap=1;;
+  esac
+  echo "$1" | tr A-Z a-z | grep -qE 'tiho|тихо' && _remap=1
+  if [ "$_remap" = 1 ]; then
     _pe=$(python3 -c 'import struct,sys
 p=sys.argv[1]
 try:
@@ -22,14 +29,15 @@ try:
 except Exception:
   pass' "$1" || true)
     case "$_bn" in *arm64*|*aarch64*) _pe=arm64;; esac
+    # crashreporter.exe рядом с firefox.exe — не arm64-браузер
     if [ "$_pe" != arm64 ]; then
-      echo "[wine] Это Windows-сборка Тихо/Firefox (x86_64). Под Wine/Hangover браузер на телефоне почти сразу закрывается."
+      echo "[wine] Это Windows-сборка Тихо/Firefox (x86_64) или её служебный файл ($_bn)."
+      echo "[wine] Под Wine/Hangover браузер на телефоне почти сразу закрывается."
       echo "[wine] Запускаю рабочий «Тихо» на встроенном Firefox ESR (arm64)."
       [ -x /usr/local/bin/tiho ] || PINGVIN_TITLE=Тихо pingvin-tiho --install /opt/pingvin tiho || exit 1
       exec pingvin-tiho --run tiho
     fi
-    ;;
-  esac
+  fi
 fi
 log() { echo "[wine] $*"; }
 PVER=hangover-11.16
@@ -69,7 +77,13 @@ case "${PINGVIN_WINE_I386:-box64}" in fex) export HODLL=libwow64fex.dll;; *) exp
 export BOX64_LOG=0 BOX64_NOBANNER=1 WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-}"
 # Песочница Chromium/Firefox (Windows) не работает под Wine — отключаем
 export MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GPU_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_VR_SANDBOX=1
-[ -s /etc/machine-id ] || head -c16 /dev/urandom | od -An -tx1 | tr -d " \n" > /etc/machine-id
+_mid=$(tr -d ' \n\r' < /etc/machine-id 2>/dev/null)
+if ! printf '%s' "$_mid" | grep -qxE '[0-9a-f]{32}'; then
+  _mid=$(head -c16 /dev/urandom | od -An -tx1 | tr -d " \n")
+  printf '%s\n' "$_mid" > /etc/machine-id
+fi
+mkdir -p /var/lib/dbus
+printf '%s\n' "$_mid" > /var/lib/dbus/machine-id
 
 move_old() { [ -e "$WINEPREFIX" ] || return 0; wineserver -k 2>/dev/null; local d="$WINEPREFIX-old-$(date +%Y%m%d-%H%M%S)"; mv "$WINEPREFIX" "$d" && log "Старый префикс перенесён в $d"; }
 PTAR=/opt/pingvin/wine-prefix.tar.xz

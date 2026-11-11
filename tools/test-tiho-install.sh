@@ -81,4 +81,6 @@ grep -q 'tiho_compat_install' "$SCR/pingvin-install" || fail "compat path missin
 grep -q 'exec pingvin-tiho --run tiho' "$SCR/pingvin-wine" || fail "wine should remap Tiho x64"
 pass script-markers
 
+echo "== runtime (выбор бинаря / миграция / dash) =="
+"$(dirname "$0")/test-tiho-runtime.sh"
 echo "Все проверки прошли."

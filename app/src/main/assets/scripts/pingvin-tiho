@@ -6,6 +6,110 @@
 # box64 (или firefox.exe через Wine+FEX) на телефоне — медленно и ломается в proot. Поэтому берём из сборки только
 # политики Тихо и запускаем их на встроенном родном arm64 Firefox ESR: отдельная копия /opt/NAME (симлинки на
 # /usr/lib/firefox-esr, свой бинарь и свой distribution/) и отдельный профиль.
+R=${PINGVIN_ROOT:-}
+
+is_browser_helper() {
+  case "$(basename "$1" | tr A-Z a-z)" in
+    chrome-sandbox|chrome_crashpad_handler|crashpad_handler|crashreporter|crashreporter-bin|crashreporter.exe|crashhelper|crashhelper.exe|minidump-analyzer|minidump-analyzer.exe|updater|updater.exe|pingsender|pingsender.exe|plugin-container|plugin-container.exe|glxtest|vaapitest|default-browser-agent|default-browser-agent.exe|elevation_service|uninstall|uninstaller|update) return 0;;
+  esac
+  return 1
+}
+looks_like_tiho() { echo "$1" | tr A-Z a-z | grep -qE 'tiho|тихо'; }
+already_tiho_wrapper() {
+  [ -n "$1" ] || return 1
+  case "$1" in *pingvin-tiho*) return 0;; esac
+  [ -f "$1" ] && grep -q 'pingvin-tiho' "$1" 2>/dev/null && return 0
+  return 1
+}
+rewrite_tiho_launcher() {
+  local name="$1"
+  [ -n "$name" ] || return 0
+  local w="$R/usr/local/bin/$name"
+  mkdir -p "$R/usr/local/bin" "$R/root/.pingvin/apps" "$R/usr/share/applications/pingvin"
+  printf '#!/bin/sh\nexec pingvin-tiho --run tiho "$@"\n' > "$w"
+  chmod +x "$w"
+  printf 'name=%s\ncmd=%s\ngui=1\nlibs=\n' "$name" "$w" > "$R/root/.pingvin/apps/$name.properties"
+  cat > "$R/usr/share/applications/pingvin/$name.desktop" <<D
+[Desktop Entry]
+Type=Application
+Name=Тихо
+Comment=Приватный браузер Тихо (Firefox ESR + uBlock Origin)
+Exec=$w %u
+Icon=firefox-esr
+Terminal=false
+Categories=Network;WebBrowser;
+D
+  echo "pingvin-tiho: ярлык «$name» перенаправлен на родной Тихо (Firefox ESR)"
+}
+
+migrate_tiho() {
+  local name cmd pf df w ex key d
+  # Каталоги /opt/*tiho* без родной сборки (.pingvin-base)
+  for d in "$R"/opt/*; do
+    [ -d "$d" ] || continue
+    looks_like_tiho "$(basename "$d")" || continue
+    [ -f "$d/.pingvin-base" ] && [ -x "$d/firefox-esr" ] && continue
+    rewrite_tiho_launcher "$(basename "$d")"
+  done
+  # Записи программ и обёртки
+  for pf in "$R"/root/.pingvin/apps/*.properties; do
+    [ -f "$pf" ] || continue
+    name=$(sed -n 's/^name=//p' "$pf" | head -1)
+    cmd=$(sed -n 's/^cmd=//p' "$pf" | head -1)
+    key=$(basename "$pf" .properties)
+    already_tiho_wrapper "$cmd" && continue
+    if looks_like_tiho "$key" || looks_like_tiho "$name" || looks_like_tiho "$cmd"; then
+      rewrite_tiho_launcher "$key"
+    elif [ -n "$cmd" ] && { is_browser_helper "$cmd" || echo "$cmd" | grep -qiE 'crashreporter|pingsender|/updater$'; }; then
+      if looks_like_tiho "$cmd" || grep -ql 'Name=Firefox' "$(dirname "$cmd")/application.ini" 2>/dev/null; then
+        rewrite_tiho_launcher "$key"
+      fi
+    fi
+  done
+  for w in "$R"/usr/local/bin/tiho* "$R"/usr/local/bin/*тихо* "$R"/usr/local/bin/win-tiho* "$R"/usr/local/bin/win-*тихо*; do
+    [ -e "$w" ] || continue
+    already_tiho_wrapper "$w" && continue
+    looks_like_tiho "$w" || continue
+    rewrite_tiho_launcher "$(basename "$w")"
+  done
+  for df in "$R"/usr/share/applications/pingvin/*.desktop \
+            "$R"/usr/share/applications/*.desktop \
+            "$R"/root/.local/share/applications/*.desktop \
+            "$R"/root/.local/share/applications/wine/*.desktop \
+            "$R"/root/.local/share/applications/wine/Programs/*.desktop; do
+    [ -f "$df" ] || continue
+    ex=$(grep -m1 '^Exec=' "$df" | cut -d= -f2-)
+    echo "$df $ex" | tr A-Z a-z | grep -qE 'tiho|тихо' || continue
+    echo "$ex" | grep -q pingvin-tiho && continue
+    key=$(basename "$df" .desktop)
+    key=${key#pingvin-win-}
+    rewrite_tiho_launcher "$key"
+    # исходный .desktop (в т.ч. wine/Programs) тоже переписываем на месте
+    if ! grep -q pingvin-tiho "$df" 2>/dev/null; then
+      sed -i "s|^Exec=.*|Exec=pingvin-tiho --run tiho %u|" "$df"
+      grep -q '^Name=' "$df" && sed -i "s|^Name=.*|Name=Тихо|" "$df" || true
+    fi
+  done
+  # Канонический «tiho», если есть встроенный Firefox (не в тестах)
+  if [ -z "$PINGVIN_MIGRATE_SKIP_BUILD" ] && [ -z "$PINGVIN_ROOT" ]; then
+    if [ ! -x /usr/local/bin/tiho ] || [ ! -x /opt/tiho/firefox-esr ]; then
+      if [ -x "${PINGVIN_FF_DIR:-/usr/lib/firefox-esr}/firefox-esr" ]; then
+        PINGVIN_TITLE=Тихо "$0" --install /opt/pingvin tiho || echo "pingvin-tiho: не удалось сразу собрать /opt/tiho — соберётся при первом запуске"
+      fi
+    fi
+  elif [ ! -e "$R/usr/local/bin/tiho" ]; then
+    rewrite_tiho_launcher tiho
+  fi
+}
+
+if [ "$1" = --is-helper ]; then
+  is_browser_helper "$2"; exit $?
+fi
+if [ "$1" = --migrate ]; then
+  migrate_tiho
+  exit 0
+fi
+
 FF=${PINGVIN_FF_DIR:-/usr/lib/firefox-esr}
 if [ "$1" = --install ]; then
   src="${2%/}"; name=${3:-tiho}; T=/opt/$name; title=${PINGVIN_TITLE:-Тихо}

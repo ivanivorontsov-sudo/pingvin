@@ -17,7 +17,15 @@ fi
 [ -n "$ENS" ] && exit 0
 export MOZ_ENABLE_WAYLAND=0 NO_AT_BRIDGE=1 GTK_A11Y=none
 eval "$(pingvin-ffprefs --env)"   # песочница/однопроцессный — только если включено в настройках
-[ -s /etc/machine-id ] || head -c16 /dev/urandom | od -An -tx1 | tr -d " \n" > /etc/machine-id
+# DBus/Firefox требуют ровно 32 hex в /etc/machine-id и /var/lib/dbus/machine-id
+_mid=$(tr -d ' \n\r' < /etc/machine-id 2>/dev/null)
+if ! printf '%s' "$_mid" | grep -qxE '[0-9a-f]{32}'; then
+  _mid=$(head -c16 /dev/urandom | od -An -tx1 | tr -d " \n")
+  printf '%s\n' "$_mid" > /etc/machine-id
+fi
+mkdir -p /var/lib/dbus
+printf '%s\n' "$_mid" > /var/lib/dbus/machine-id
+export NO_AT_BRIDGE=1 GTK_A11Y=none MOZ_ENABLE_WAYLAND=0
 P=${PINGVIN_FF_PROFILE:-/root/.pingvin/firefox}; mkdir -p $P   # «Тихо» и др. копии — свой профиль
 pingvin-ffprefs "$P"   # user.js + policies (в т.ч. для уже существующего профиля)
 # Один экземпляр на профиль: раньше повторный запуск (при переключении Linux/Windows) удалял lock и

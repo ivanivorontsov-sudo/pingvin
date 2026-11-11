@@ -69,7 +69,7 @@ public class DisplayActivity extends Activity implements RfbClient.Listener {
 
     void runProg(String prog) throws Exception {
         say("Запускаю: " + prog);
-        Process p = lx.start("export DISPLAY=:" + N + "; exec pingvin-run " + prog);
+        Process p = lx.start("export DISPLAY=:" + N + "; exec bash /usr/local/bin/pingvin-run " + shQuote(prog));
         progProc = p; p.getOutputStream().close();
         BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
         String l; while ((l = br.readLine()) != null) say(l);
@@ -83,6 +83,17 @@ public class DisplayActivity extends Activity implements RfbClient.Listener {
                 .setPositiveButton("Закрыть дисплей", (d, w) -> finish()).setNeutralButton("Копировать", (d, w) -> LogShare.copy(this, log.getText()))
                 .setNegativeButton("Поделиться", (d, w) -> LogShare.share(this, log.getText())).setCancelable(false).show(); });
         else runOnUiThread(() -> { if (!isFinishing()) Toast.makeText(this, "Программа завершилась", Toast.LENGTH_SHORT).show(); });
+    }
+
+    static String shQuote(String s) {
+        if (s == null) return "''";
+        StringBuilder b = new StringBuilder("'");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\'') b.append("'\\''");
+            else b.append(c);
+        }
+        return b.append("'").toString();
     }
 
     /** Хвосты логов запуска из Linux — чтобы сбой Тихо/Electron/Wine был виден, а не «тихий» выход. */

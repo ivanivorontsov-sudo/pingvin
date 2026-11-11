@@ -1,8 +1,50 @@
-#!/bin/sh
-# pingvin-run PROG [args] - runs a Linux program; foreign x86_64/i386 ELF -> box64
+#!/bin/bash
+# pingvin-run PROG [args] — Linux-программа; чужой x86_64/i386 ELF → box64.
+# Совместим с dash/sh (без массива PIPESTATUS, $SECONDS и массивов): Debian 13
+# держит /bin/sh → dash, и старый shebang #!/bin/sh как раз давал «Bad substitution» (код 2).
 [ -z "$1" ] && { echo "usage: pingvin-run prog [args]"; exit 1; }
+
+R=${PINGVIN_ROOT:-}
+
+pv_helper() {
+  case "$(basename "$1" | tr A-Z a-z)" in
+    chrome-sandbox|chrome_crashpad_handler|crashpad_handler|crashreporter|crashreporter-bin|crashreporter.exe|crashhelper|crashhelper.exe|minidump-analyzer|minidump-analyzer.exe|updater|updater.exe|pingsender|pingsender.exe|plugin-container|plugin-container.exe|glxtest|vaapitest|default-browser-agent|default-browser-agent.exe|elevation_service|uninstall|uninstaller|update) return 0;;
+  esac
+  return 1
+}
+pv_tiho_name() { echo "$1" | tr A-Z a-z | grep -qE 'tiho|тихо'; }
+pv_in_ff_dir() {
+  d=$(dirname "$1")
+  [ -f "$d/application.ini" ] && grep -qi '^Name=Firefox' "$d/application.ini" && return 0
+  [ -f "$d/../application.ini" ] && grep -qi '^Name=Firefox' "$d/../application.ini" && return 0
+  return 1
+}
+pv_foreign_elf() {
+  [ -f "$1" ] || return 1
+  mag=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+  [ "$mag" = 7f454c46 ] || return 1
+  m=$(od -An -tu2 -j18 -N2 "$1" | tr -d ' ')
+  host=$(uname -m)
+  case "$m" in
+    62) [ "$host" != x86_64 ];;
+    3)  case "$host" in x86_64|i?86) return 1;; *) return 0;; esac;;
+    183) [ "$host" != aarch64 ];;
+    *) return 1;;
+  esac
+}
+
+# Старые ярлыки 1.14 (tiho-linux-x86 → crashreporter, win-тихо → Wine) — до чтения properties.
+if [ -z "$PINGVIN_NO_MIGRATE" ] && command -v pingvin-tiho >/dev/null 2>&1; then
+  mark="$R/root/.pingvin/.tiho-migrated-1.16"
+  if [ ! -f "$mark" ]; then
+    mkdir -p "$R/root/.pingvin"
+    pingvin-tiho --migrate || true
+    : > "$mark" 2>/dev/null || true
+  fi
+fi
+
 p="$1"; shift
-cfg=/root/.pingvin/apps/$p.properties
+cfg="$R/root/.pingvin/apps/$p.properties"
 if [ -f "$cfg" ]; then
   c=$(sed -n 's/^cmd=//p' "$cfg"); l=$(sed -n 's/^libs=//p' "$cfg")
   if [ -n "$l" ]; then export BOX64_LD_LIBRARY_PATH="$l"; export LD_LIBRARY_PATH="$l"; fi
@@ -11,13 +53,43 @@ if [ -f "$cfg" ]; then
 fi
 case "$p" in */*) f="$p";; *) f=$(command -v "$p" 2>/dev/null);; esac
 [ -n "$f" ] && [ -f "$f" ] || { echo "pingvin-run: not found: $p" >&2; exit 127; }
-real=$(readlink -f "$f")
-# Неверно выбранный исполняемый (chrome-sandbox, crashpad, .so) — выбираем заново и чиним запись
-case "$(basename "$real")" in chrome-sandbox|chrome_crashpad_handler|crashpad_handler|*.so|*.so.*)
-  top=$(echo "$real" | sed -E 's#^(/opt/[^/]+)/.*#\1#'); n=$(pingvin-pickexe "$top" "$(basename "$top")") && {
+real=$(readlink -f "$f" 2>/dev/null || echo "$f")
+
+redirect_tiho() {
+  echo "pingvin-run: «$(basename "$real")» — не браузер (служебный файл или x86_64/Windows Тихо)."
+  echo "Запускаю родной «Тихо» на встроенном Firefox ESR (arm64)."
+  if [ -n "$PINGVIN_TEST_REDIRECT" ]; then
+    echo "PINGVIN_REDIRECT pingvin-tiho"
+    exit 0
+  fi
+  command -v pingvin-tiho >/dev/null 2>&1 || { echo "pingvin-run: нет pingvin-tiho" >&2; exit 1; }
+  exec pingvin-tiho --run tiho "$@"
+}
+
+should_tiho=0
+if pv_tiho_name "$real" || pv_tiho_name "$f" || pv_tiho_name "$cfg" || pv_tiho_name "$p"; then
+  if pv_helper "$real" || pv_foreign_elf "$real" || pv_in_ff_dir "$real"; then
+    should_tiho=1
+  fi
+  if [ -f "$real" ] && head -c 2 "$real" 2>/dev/null | grep -q '^#!'; then
+    if grep -qiE 'pingvin-wine|\.exe|wine ' "$real" 2>/dev/null; then
+      should_tiho=1
+    fi
+  fi
+fi
+[ "$should_tiho" = 1 ] && redirect_tiho "$@"
+
+# Неверно выбранный исполняемый (chrome-sandbox, crashreporter, .so) — выбираем заново и чиним запись
+if pv_helper "$real"; then
+  top=$(dirname "$real")
+  [ -f "$top/application.ini" ] || top=$(dirname "$top")
+  case "$real" in /opt/*/*) top=$(echo "$real" | sed -E 's#^(/opt/[^/]+)/.*#\1#');; esac
+  n=$(pingvin-pickexe "$top" "$(basename "$top")" 2>/dev/null) && {
     echo "pingvin-run: «$(basename "$real")» не программа — запускаю $n" >&2
-    [ -f "$cfg" ] && sed -i "s#^cmd=.*#cmd=$n#" "$cfg"; f="$n"; real=$(readlink -f "$n"); };;
-esac
+    [ -n "$cfg" ] && [ -f "$cfg" ] && sed -i "s#^cmd=.*#cmd=$n#" "$cfg"
+    f="$n"; real=$(readlink -f "$n" 2>/dev/null || echo "$n")
+  }
+fi
 # Electron/Chromium: под proot нет песочницы и /dev/shm мал
 ed=$(dirname "$real")
 if [ -e "$ed/chrome-sandbox" ] || [ -e "$ed/resources/app.asar" ] || [ -e "$ed/v8_context_snapshot.bin" ] || [ -e "$ed/chrome_crashpad_handler" ] \
@@ -29,13 +101,17 @@ if [ -e "$ed/chrome-sandbox" ] || [ -e "$ed/resources/app.asar" ] || [ -e "$ed/v
          --disable-seccomp-filter-sandbox --disable-namespace-sandbox --ozone-platform=x11 "$@"
 fi
 logged_run() {
-  mkdir -p /root/.pingvin
+  mkdir -p "$R/root/.pingvin" /root/.pingvin 2>/dev/null || mkdir -p /tmp
   LOG=/root/.pingvin/run.log
+  [ -n "$R" ] && LOG="$R/root/.pingvin/run.log"
   echo "=== $(date '+%F %T') $* ===" >> "$LOG"
-  start=$SECONDS
-  "$@" 2>&1 | tee -a "$LOG"
-  rc=${PIPESTATUS[0]}
-  dur=$((SECONDS-start))
+  start=$(date +%s 2>/dev/null || echo 0)
+  _rcf=$(mktemp "${TMPDIR:-/tmp}/pingvin-rc.XXXXXX" 2>/dev/null || echo "${TMPDIR:-/tmp}/pingvin-rc.$$")
+  { "$@"; echo $? > "$_rcf"; } 2>&1 | tee -a "$LOG"
+  rc=$(cat "$_rcf" 2>/dev/null || echo 0)
+  rm -f "$_rcf"
+  end=$(date +%s 2>/dev/null || echo 0)
+  dur=$((end-start))
   echo "=== код $rc за ${dur} с ===" >> "$LOG"
   if [ "$dur" -le 8 ] && ! grep -q 'Firefox уже открыт' "$LOG" 2>/dev/null; then
     echo "✖ Программа завершилась сразу (код $rc, ${dur} с). Это похоже на сбой запуска, а не на обычный выход."

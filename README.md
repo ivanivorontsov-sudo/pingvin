@@ -5,7 +5,7 @@ Android-приложение с полноценным Linux (Debian 13) вну�
 ## Скачать
 
 - Релизы: https://github.com/ivanivorontsov-sudo/pingvin/releases
-- Свежий APK: [Пингвин 1.15](https://github.com/ivanivorontsov-sudo/pingvin/releases/tag/v1.15)
+- Свежий APK: [Пингвин 1.16](https://github.com/ivanivorontsov-sudo/pingvin/releases/tag/v1.16)
 
 Нужен телефон или планшет на Android 8+; лучше **arm64** (почти все современные устройства). Первый запуск распаковывает Debian и встроенные пакеты — это может занять несколько минут.
 
@@ -22,9 +22,11 @@ Android-приложение с полноценным Linux (Debian 13) вну�
 
 Сборки «Тихо для ПК» (архив Firefox ESR с [tiho-updates](https://github.com/ivanivorontsov-sudo/tiho-updates/releases/tag/desktop-v153.6.0) или установщик Electron `.deb` / AppImage / `.exe`) на телефоне **нельзя запустить как есть**: это x86_64 Electron или x86_64 Firefox, и через box64/Wine они сразу закрываются (песочница Chromium/Gecko, GPU, эмуляция).
 
-Пингвин 1.15 ставит их как ярлык **«Тихо»** на встроенном родном Firefox ESR (arm64) с политиками приватности Тихо (uBlock Origin, защита от слежки). Так работают и Linux-файл, и Windows-файл.
+Пингвин 1.16 ставит их как ярлык **«Тихо»** на встроенном родном Firefox ESR (arm64) с политиками приватности Тихо (uBlock Origin, защита от слежки). Так работают и Linux-файл, и Windows-файл.
 
 Если после запуска окно сразу исчезло, нажмите **«Лог»** на дисплее — там будет причина, а не молчаливый выход.
+
+После обновления с 1.14/1.15 старые ярлыки вроде «tiho-linux-x86» (они запускали x86_64 `crashreporter` через box64) автоматически переписываются на родной «Тихо». Достаточно установить APK 1.16 поверх — заново выбирать файл не обязательно.
 
 Для настоящего окна Electron «Тихо» на телефоне нужна сборка Linux **aarch64** (см. релизы tiho-updates) — её Пингвин ставит и запускает нативно, с флагами `--no-sandbox` и без GPU.
 

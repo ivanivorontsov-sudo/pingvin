@@ -1,9 +1,21 @@
 #!/bin/bash
 # pingvin-pickexe DIR [NAME] — найти главный исполняемый файл распакованной программы
-# 1) Exec из .desktop пакета; 2) Electron: бинарь рядом с resources/app.asar; 3) самый крупный ELF.
+# 1) Exec из .desktop; 2) известные имена (firefox/tiho); 3) Electron рядом с app.asar; 4) самый крупный ELF.
+# Служебные файлы Firefox/Chromium (crashreporter, updater, pingsender, …) никогда не выбираем:
+# у Тихо/Firefox crashreporter (~4 МБ) больше, чем загрузчик firefox (~5 КБ).
 D="${1%/}"; N="$(echo "$2" | tr A-Z a-z)"
-bad() { case "$(basename "$1")" in chrome-sandbox|chrome_crashpad_handler|crashpad_handler|*.so|*.so.*|*.pak|*.bin|*.dat|*.json|update|uninstall*|*helper*) return 0;; esac; return 1; }
-ok() { [ -f "$1" ] && [ -x "$1" ] && ! bad "$1"; }
+bad() { case "$(basename "$1" | tr A-Z a-z)" in
+  chrome-sandbox|chrome_crashpad_handler|crashpad_handler|crashreporter|crashreporter-bin|crashreporter.exe|crashhelper|crashhelper.exe|minidump-analyzer|minidump-analyzer.exe|updater|updater.exe|pingsender|pingsender.exe|plugin-container|plugin-container.exe|glxtest|vaapitest|default-browser-agent|default-browser-agent.exe|elevation_service|uninstall|uninstaller|update|*.so|*.so.*|*.pak|*.bin|*.dat|*.json|*helper*|*crash*) return 0;;
+  esac; return 1; }
+ok() {
+  [ -f "$1" ] && [ -x "$1" ] && ! bad "$1" || return 1
+  local mag
+  mag=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+  [ "$mag" = 7f454c46 ] && return 0
+  case "$mag" in 4d5a*) return 0;; esac
+  head -c 2 "$1" 2>/dev/null | grep -q '^#!' && return 0
+  return 1
+}
 inroot() { # путь из пакета -> путь в D (с учётом абсолютных симлинков внутри пакета)
   local p="$1" i; for i in 1 2 3 4 5 6; do
     case "$p" in "$D"/*) ;; /*) p="$D$p";; esac
@@ -14,6 +26,15 @@ for df in "$D"/usr/share/applications/*.desktop "$D"/*.desktop; do [ -f "$df" ] 
   t=$(echo "$e" | sed -E 's/^"([^"]*)".*/\1/; t; s/ .*//')
   case "$t" in /*) c=$(inroot "$t");; *) c=$(inroot "/usr/bin/$t");; esac
   ok "$c" && { readlink -f "$c" 2>/dev/null || echo "$c"; exit 0; }
+done
+# Сначала известный главный бинарь — не самый большой ELF (иначе выигрывает crashreporter).
+for pref in firefox-esr firefox firefox-bin firefox.exe tiho tiho.exe; do
+  while IFS= read -r f; do
+    [ "$(basename "$f" | tr A-Z a-z)" = "$pref" ] || continue
+    ok "$f" || continue
+    readlink -f "$f" 2>/dev/null || echo "$f"
+    exit 0
+  done < <(find "$D" -maxdepth 5 -type f 2>/dev/null)
 done
 best=""; bs=0
 for a in $(find "$D" -maxdepth 6 -path '*/resources/app.asar' 2>/dev/null | tr '\n' '\001' | tr ' ' '\002' | tr '\001' ' '); do

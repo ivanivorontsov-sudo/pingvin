@@ -84,7 +84,7 @@ public class Linux {
         } catch (Exception e) { android.util.Log.e("pingvin", "gui debs", e); return false; }
     }
 
-    public static final String EXTRAS_VER = "1.15";
+    public static final String EXTRAS_VER = "1.16";
     static final Object EXTRAS_LOCK = new Object();
     /** Однократно: обновляет скрипты после обновления APK, распаковывает встроенный Wine (Hangover, arm64) и Firefox ESR. */
     static final String[] WINE_KEYS = {"usr/lib/wine/aarch64-unix/ntdll.so", "usr/lib/wine/aarch64-unix/wine", "usr/lib/wine/aarch64-windows/kernel32.dll",
@@ -134,6 +134,13 @@ public class Linux {
                     }
                 }
                 mark.getParentFile().mkdirs(); mark.createNewFile();
+                try {
+                    if (log != null) log.line("Обновляю ярлыки «Тихо»…");
+                    Result mr = exec("pingvin-tiho --migrate", 90);
+                    if (log != null && mr.out != null && !mr.out.trim().isEmpty()) log.line(mr.out.trim());
+                } catch (Exception me) {
+                    if (log != null) log.line("Миграция ярлыков Тихо: " + me);
+                }
             } catch (Exception e) { if (log != null) log.line("Ошибка распаковки встроенных компонентов: " + e); android.util.Log.e("pingvin", "extras", e); }
         }
     }
@@ -161,8 +168,30 @@ public class Linux {
             }
         }
         ensureGuiDebs();
+        ensureMachineId();
         new File(rootfs, "root/.pingvin/queue").mkdirs();
         new File(rootfs, "root/Android").mkdirs();
+    }
+
+    /** Firefox/DBus требуют 32 hex-цифры; «uninitialized» или пустой файл дают «machine-id invalid». */
+    void ensureMachineId() throws IOException {
+        File mid = new File(rootfs, "etc/machine-id");
+        String id = null;
+        if (mid.isFile()) {
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(mid), StandardCharsets.UTF_8))) {
+                String line = r.readLine();
+                if (line != null) id = line.trim();
+            }
+        }
+        if (id == null || !id.matches("[0-9a-f]{32}")) {
+            byte[] raw = new byte[16];
+            new java.security.SecureRandom().nextBytes(raw);
+            StringBuilder sb = new StringBuilder(32);
+            for (byte x : raw) sb.append(String.format("%02x", x & 0xff));
+            id = sb.toString();
+            write("etc/machine-id", id + "\n");
+        }
+        write("var/lib/dbus/machine-id", id + "\n");
     }
 
     void write(String rel, String s) throws IOException {
